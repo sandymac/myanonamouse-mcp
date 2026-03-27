@@ -24,7 +24,7 @@ const DEFAULT_DISABLED: &[&str] = &[
 ];
 
 #[derive(Parser, Debug)]
-#[command(name = "myanonamouse-mcp", about = "MCP server for MyAnonamouse")]
+#[command(name = "myanonamouse-mcp", about = "MCP server for MyAnonamouse", version)]
 struct Cli {
     /// MyAnonamouse session cookie value (mam_id). Obtain from your browser after logging in.
     #[arg(long, env = "MAM_SESSION")]
