@@ -491,7 +491,10 @@ impl MamServer {
 
             if let Some(dl) = &t.dl {
                 if !dl.is_empty() {
-                    out.push_str(&format!("   DL key:    {dl}\n"));
+                    out.push_str(&format!(
+                        "   DL URL:    {}/tor/download.php/{dl}\n",
+                        crate::mam::BASE_URL
+                    ));
                 }
             }
         }
@@ -558,14 +561,14 @@ impl MamServer {
         for entry in &entries {
             // timestamp is unix seconds (with microseconds as fractional part)
             let secs = entry.timestamp as i64;
+            let ts = chrono::DateTime::from_timestamp(secs, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| secs.to_string());
             let amount = Self::value_as_i64(&entry.amount);
             let sign = if amount >= 0 { "+" } else { "" };
 
             out.push_str(&format!(
                 "\n  [{ts}] {sign}{amount} — {btype}",
-                ts = secs,
-                sign = sign,
-                amount = amount,
                 btype = entry.bonus_type,
             ));
 

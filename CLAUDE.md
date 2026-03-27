@@ -39,6 +39,7 @@ Rust for the code. Cargo for package management and build system.
 | `tracing` | Logging |
 | `tracing-subscriber` | Log output formatting — **must be configured to write to stderr or a file, never stdout**. Any output on stdout corrupts the JSON-RPC framing used by the MCP stdio transport. — features: `env-filter` |
 | `clap` | CLI args — features: `derive`, `env` |
+| `chrono` | Timestamp formatting — features: `std`, no default features |
 
 ## Authentication
 
