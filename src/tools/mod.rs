@@ -55,11 +55,14 @@ struct TorrentResult {
 #[derive(Deserialize)]
 struct UserDataResponse {
     username: Option<String>,
-    uid: Option<Value>,
+    uid: Option<u64>,
     classname: Option<String>,
     downloaded: Option<String>,
     uploaded: Option<String>,
-    ratio: Option<String>,
+    ratio: Option<f64>,
+    seedbonus: Option<u64>,
+    wedges: Option<u64>,
+    country_name: Option<String>,
     notifs: Option<Value>,
 }
 
@@ -426,26 +429,34 @@ impl MamServer {
         let mut out = String::new();
 
         if let Some(name) = &resp.username {
-            out.push_str(&format!("Username:   {name}\n"));
+            out.push_str(&format!("Username:    {name}\n"));
         }
-        if let Some(uid) = &resp.uid {
-            out.push_str(&format!("User ID:    {}\n", Self::value_as_str(uid)));
+        if let Some(uid) = resp.uid {
+            out.push_str(&format!("User ID:     {uid}\n"));
         }
         if let Some(class) = &resp.classname {
-            out.push_str(&format!("Class:      {class}\n"));
+            out.push_str(&format!("Class:       {class}\n"));
+        }
+        if let Some(country) = &resp.country_name {
+            out.push_str(&format!("Country:     {country}\n"));
         }
         if let Some(up) = &resp.uploaded {
-            out.push_str(&format!("Uploaded:   {up}\n"));
+            out.push_str(&format!("Uploaded:    {up}\n"));
         }
         if let Some(down) = &resp.downloaded {
-            out.push_str(&format!("Downloaded: {down}\n"));
+            out.push_str(&format!("Downloaded:  {down}\n"));
         }
-        if let Some(ratio) = &resp.ratio {
-            out.push_str(&format!("Ratio:      {ratio}\n"));
+        if let Some(ratio) = resp.ratio {
+            out.push_str(&format!("Ratio:       {ratio:.2}\n"));
+        }
+        if let Some(bonus) = resp.seedbonus {
+            out.push_str(&format!("Seed bonus:  {bonus}\n"));
+        }
+        if let Some(wedges) = resp.wedges {
+            out.push_str(&format!("Wedges:      {wedges}\n"));
         }
 
         if let Some(notifs) = &resp.notifs {
-            // notifs is an associative array of notification entries
             let count = match notifs {
                 Value::Array(arr) => arr.len(),
                 Value::Object(map) => map.len(),
