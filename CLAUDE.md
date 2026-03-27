@@ -73,9 +73,9 @@ MCP Client (Claude Desktop, etc.)
 |---|---|
 | `Cargo.toml` | Manifest — dependencies, metadata, binary definition |
 | `Cargo.lock` | Exact dependency versions (kept for binaries) |
-| `src/main.rs` | Entry point — CLI arg parsing, transport selection, server startup, HTTP auth middleware |
-| `src/tools/mod.rs` | All MCP tool implementations + `ServerHandler` impl |
-| `src/mam/mod.rs` | MAM HTTP client — `reqwest::Client` construction, shared request logic |
+| `src/main.rs` | Entry point — CLI arg parsing, `--list-tools`, `--test-connection`, transport selection, server startup, HTTP auth middleware |
+| `src/mam/mod.rs` | MAM HTTP client — `build_client` (cookie + User-Agent injection), `get_ip_info`, `enrich_error` |
+| `src/tools/mod.rs` | `MamServer` struct + all MCP tool implementations + `ServerHandler` impl |
 | `tests/` | Integration tests |
 | `api-docs/` | MAM API documentation (HTML) |
 
