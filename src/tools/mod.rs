@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use rmcp::{
@@ -511,11 +512,38 @@ impl MamServer {
 // Constructor and helpers
 // ---------------------------------------------------------------------------
 
+/// Registry of all tools: (name, group, enabled_by_default).
+/// Used by --list-tools and to build the enabled set at startup.
+pub const TOOL_REGISTRY: &[(&str, &str, bool)] = &[
+    ("search_torrents",        "power",   true),
+    ("get_torrent_details",    "power",   true),
+    ("get_ip_info",            "default", true),
+    ("get_user_data",          "user",    false),
+    ("get_user_bonus_history", "user",    false),
+    ("update_seedbox_ip",      "seedbox", false),
+];
+
+/// All tool names known to MamServer, derived from TOOL_REGISTRY.
+pub const ALL_TOOL_NAMES: &[&str] = &[
+    "search_torrents",
+    "get_torrent_details",
+    "get_ip_info",
+    "get_user_data",
+    "get_user_bonus_history",
+    "update_seedbox_ip",
+];
+
 impl MamServer {
-    pub fn new(client: Arc<reqwest::Client>) -> Self {
+    pub fn new(client: Arc<reqwest::Client>, enabled_tools: HashSet<String>) -> Self {
+        let mut router = Self::tool_router();
+        for name in ALL_TOOL_NAMES {
+            if !enabled_tools.contains(*name) {
+                router.remove_route(name);
+            }
+        }
         Self {
             client,
-            tool_router: Self::tool_router(),
+            tool_router: router,
         }
     }
 

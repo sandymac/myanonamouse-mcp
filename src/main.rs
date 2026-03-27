@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -11,8 +12,8 @@ mod tools;
 #[command(name = "myanonamouse-mcp", about = "MCP server for MyAnonamouse", version)]
 struct Cli {
     /// MyAnonamouse session cookie value (mam_id). Obtain from the Security tab of your Preferences on MyAnonamouse.
-    #[arg(long, env = "MAM_SESSION")]
-    mam_session: String,
+    #[arg(long, env = "MAM_SESSION", required_unless_present = "list_tools")]
+    mam_session: Option<String>,
 
     /// MCP transport to use
     #[arg(long, default_value = "stdio")]
@@ -26,7 +27,32 @@ struct Cli {
     #[arg(long, env = "MAM_API_TOKEN")]
     api_token: Option<String>,
 
-    /// Verify the session cookie is valid and exit
+    /// Enable the search_torrents (full-parameter power search) and get_torrent_details tools.
+    /// These are on by default until per-category friendly search tools are added.
+    #[arg(long, default_value_t = false)]
+    enable_power_tools: bool,
+
+    /// Enable the get_user_data and get_user_bonus_history tools.
+    #[arg(long, default_value_t = false)]
+    enable_user_tools: bool,
+
+    /// Enable the update_seedbox_ip tool.
+    #[arg(long, default_value_t = false)]
+    enable_seedbox: bool,
+
+    /// Enable a specific tool by name. Can be repeated. Applied before --disable-tool.
+    #[arg(long = "enable-tool", value_name = "TOOL")]
+    enable_tool: Vec<String>,
+
+    /// Disable a specific tool by name. Can be repeated. Applied last; wins over all enable flags.
+    #[arg(long = "disable-tool", value_name = "TOOL")]
+    disable_tool: Vec<String>,
+
+    /// Print all available tool names with their default group membership and exit.
+    #[arg(long, default_value_t = false)]
+    list_tools: bool,
+
+    /// Verify the session cookie is valid and exit.
     #[arg(long, default_value_t = false)]
     test_connection: bool,
 }
@@ -50,9 +76,21 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    if cli.list_tools {
+        eprintln!("Available tools (* = enabled by default):\n");
+        for &(name, group, default) in tools::TOOL_REGISTRY {
+            let marker = if default { "*" } else { " " };
+            eprintln!("  {marker} {name:<30} ({})", group);
+        }
+        eprintln!("\nGroup flags: --enable-power-tools, --enable-user-tools, --enable-seedbox");
+        eprintln!("Per-tool:    --enable-tool=<name>  --disable-tool=<name>");
+        return Ok(());
+    }
+
     info!("Starting myanonamouse-mcp");
 
-    let client = Arc::new(mam::build_client(&cli.mam_session)?);
+    let mam_session = cli.mam_session.expect("--mam-session is required unless --list-tools is set");
+    let client = Arc::new(mam::build_client(&mam_session)?);
 
     if cli.test_connection {
         let ip_info = mam::get_ip_info(&client).await?;
@@ -60,10 +98,58 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // --- Compute the enabled tool set ---
+    // Start from defaults defined in TOOL_REGISTRY; group flags and per-tool flags add/remove.
+    // --disable-tool always wins (applied last).
+    let mut enabled_tools: HashSet<String> = tools::TOOL_REGISTRY
+        .iter()
+        .filter(|(_, _, default)| *default)
+        .map(|(name, _, _)| name.to_string())
+        .collect();
+
+    // Group flag: --enable-power-tools
+    // (search_torrents and get_torrent_details are default today; this flag is a forward-compat
+    //  hook so configs remain valid once per-category tools replace them as the default.)
+    if cli.enable_power_tools {
+        for (name, group, _) in tools::TOOL_REGISTRY {
+            if *group == "power" {
+                enabled_tools.insert(name.to_string());
+            }
+        }
+    }
+    // Group flag: --enable-user-tools
+    if cli.enable_user_tools {
+        for (name, group, _) in tools::TOOL_REGISTRY {
+            if *group == "user" {
+                enabled_tools.insert(name.to_string());
+            }
+        }
+    }
+    // Group flag: --enable-seedbox
+    if cli.enable_seedbox {
+        for (name, group, _) in tools::TOOL_REGISTRY {
+            if *group == "seedbox" {
+                enabled_tools.insert(name.to_string());
+            }
+        }
+    }
+    // Per-tool enables
+    for tool in &cli.enable_tool {
+        enabled_tools.insert(tool.clone());
+    }
+    // Per-tool disables (always wins)
+    for tool in &cli.disable_tool {
+        enabled_tools.remove(tool);
+    }
+
+    let mut sorted_tools: Vec<&str> = enabled_tools.iter().map(|s| s.as_str()).collect();
+    sorted_tools.sort();
+    info!(tools = ?sorted_tools, "Enabled tools");
+
     match cli.transport {
         Transport::Stdio => {
             info!("Starting MCP server on stdio");
-            let server = tools::MamServer::new(client);
+            let server = tools::MamServer::new(client, enabled_tools);
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }
@@ -93,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
             let mcp_service = {
                 let client = client.clone();
                 StreamableHttpService::new(
-                    move || Ok(tools::MamServer::new(client.clone())),
+                    move || Ok(tools::MamServer::new(client.clone(), enabled_tools.clone())),
                     Arc::new(LocalSessionManager::default()),
                     StreamableHttpServerConfig::default(),
                 )
