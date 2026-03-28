@@ -27,9 +27,9 @@ MyAnonamouse authenticates via a session cookie named `mam_id`. There is no API 
 2. Go to **Preferences → Security**
 3. Copy the value shown for `mam_id`
 
-> The `mam_id` value is long and may contain an `=` sign at the end. Copy the full value as-is.
+> The `mam_id` value is long and may contain an `%3D` which may need to be replaced with an `=` sign at the end. Use `--test-connection` to verify.
 
-Supply the value via the `--mam-session` flag or the `MAM_SESSION` environment variable. The cookie expires periodically; if you get authentication errors, refresh it from Preferences → Security.
+Supply the value via the `--mam-session` flag or the `MAM_SESSION` environment variable. The cookie expires periodically; if you get authentication errors, refresh it from Preferences → Security and verify it with `--test-connection`.
 
 ## Quick start
 
@@ -137,13 +137,21 @@ myanonamouse-mcp --mam-session <id> --disable-tool=search_audiobooks --disable-t
 
 ## HTTP transport
 
-The server can also run as an HTTP server (useful for remote access or multi-user deployments):
+To use the HTTP/SSE transport for remote or agentic clients, start with `--transport http`:
 
 ```bash
-myanonamouse-mcp --mam-session <id> --transport http --http-bind 0.0.0.0:8080 --api-token <secret>
+myanonamouse-mcp --mam-session "mam_id" --transport http --http-bind 127.0.0.1:8080 --api-token "your-secret-token"
 ```
 
-The MCP endpoint is at `http://host:8080/mcp`. Clients must send `Authorization: Bearer <secret>` with every request. If `--api-token` is omitted, the endpoint is unauthenticated — only do this on a trusted network.
+MCP clients connect to `http://<host>:8080/mcp`. The `--api-token` flag is strongly recommended when binding to a network interface — without it, anyone who can reach the port can access the MCP endpoint.
+
+Clients must include the token in every request when `--api-token` is set:
+
+```
+Authorization: Bearer your-secret-token
+```
+
+> For internet-facing deployments, put this behind a reverse proxy (nginx, Caddy, Traefik) that terminates TLS. The server itself does not handle HTTPS.
 
 ## Tips for best results
 
