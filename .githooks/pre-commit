@@ -1,0 +1,12 @@
+#!/bin/sh
+# Regenerate THIRD_PARTY_LICENSES.html when Cargo.toml or Cargo.lock change.
+if git diff --cached --name-only | grep -qE '^Cargo\.(toml|lock)$'; then
+    if ! command -v cargo-about >/dev/null 2>&1; then
+        echo "warning: cargo-about not found; THIRD_PARTY_LICENSES.html not updated."
+        echo "         Install with: cargo install cargo-about"
+        exit 0
+    fi
+    echo "Regenerating THIRD_PARTY_LICENSES.html..."
+    cargo about generate --all-features about.hbs -o THIRD_PARTY_LICENSES.html
+    git add THIRD_PARTY_LICENSES.html
+fi

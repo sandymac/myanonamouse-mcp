@@ -2,6 +2,8 @@
 name = "myanonamouse-mcp"
 version = "0.3.4"
 edition = "2021"
+license = "MIT"
+license-file = "LICENSE"
 default-run = "myanonamouse-mcp"
 
 [[bin]]

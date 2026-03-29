@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Sandy McArthur, Jr.
+// SPDX-License-Identifier: MIT
+
 use anyhow::anyhow;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde::Deserialize;

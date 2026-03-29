@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Sandy McArthur, Jr.
+// SPDX-License-Identifier: MIT
+
 /// mam-count-languages: query MyAnonamouse for the total torrent count per language
 /// and print a ranked table to stdout.
 ///
