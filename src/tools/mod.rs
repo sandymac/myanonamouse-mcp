@@ -50,6 +50,7 @@ struct TorrentResult {
     tags: Option<Value>,
     seeders: Option<u64>,
     leechers: Option<u64>,
+    times_completed: Option<u64>,
     free: Option<u64>,
     vip: Option<u64>,
     added: Option<String>,
@@ -382,6 +383,99 @@ fn parse_sort(s: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Map a natural-language time period to (start_date, end_date) unix timestamp strings.
+/// Returns empty strings for "all time" (no date filtering).
+fn parse_period(s: &str) -> Result<(String, String), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let end = now.to_string();
+    match normalize_lookup(s).as_str() {
+        "all time" | "all" | "" => Ok(("".to_string(), "".to_string())),
+        "past year" | "year" | "1 year" | "1y" => Ok(((now - 365 * 86400).to_string(), end)),
+        "past month" | "month" | "1 month" | "30 days" | "1m" => Ok(((now - 30 * 86400).to_string(), end)),
+        "past week" | "week" | "1 week" | "7 days" | "1w" => Ok(((now - 7 * 86400).to_string(), end)),
+        "past day" | "day" | "1 day" | "24 hours" | "today" | "1d" => Ok(((now - 86400).to_string(), end)),
+        _ => Err(format!(
+            "Unrecognized time period: \"{s}\". Valid: all time, past year, past month, past week, past day."
+        )),
+    }
+}
+
+/// Map category names to (main_cat IDs, subcategory IDs) for cross-category filtering.
+/// Accepts parent names (AudioBooks, E-Books, Musicology, Radio) which resolve to main_cat IDs,
+/// and subcategory names which are searched across all genre tables. Ambiguous subcategory names
+/// resolve to all matching IDs; qualify with parent prefix to disambiguate (e.g. "AudioBooks Fantasy").
+fn lookup_top10_categories(names: &[String]) -> Result<(Vec<u32>, Vec<u32>), String> {
+    let mut main_cats: Vec<u32> = Vec::new();
+    let mut sub_cats: Vec<u32> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+
+    for name in names {
+        let key = normalize_lookup(name);
+        match key.as_str() {
+            "all" => {} // no filtering
+            "audiobooks" | "audiobook" => push_unique(&mut main_cats, 13),
+            "ebooks" | "e books" | "ebook" | "e book" => push_unique(&mut main_cats, 14),
+            "musicology" => push_unique(&mut main_cats, 15),
+            "radio" => push_unique(&mut main_cats, 16),
+            _ => {
+                // Check for qualified "Parent SubCategory" prefix
+                let (tables, search_key) = parse_qualified_category(&key);
+                let mut found = false;
+                for table in &tables {
+                    if let Some(&(_, id)) = table.iter().find(|(k, _)| *k == search_key) {
+                        push_unique(&mut sub_cats, id);
+                        found = true;
+                    }
+                }
+                if !found {
+                    unknown.push(name.clone());
+                }
+            }
+        }
+    }
+
+    if unknown.is_empty() {
+        Ok((main_cats, sub_cats))
+    } else {
+        Err(format!(
+            "Unrecognized category: {}. Use a parent name (AudioBooks, E-Books, Musicology, \
+             Radio) or a subcategory name (e.g. Fantasy, Mystery, Science Fiction). Qualify \
+             ambiguous names like \"AudioBooks Fantasy\" vs \"E-Books Fantasy\".",
+            unknown.join(", ")
+        ))
+    }
+}
+
+/// If the key starts with a known parent prefix, return only that parent's genre table
+/// and the remaining subcategory portion. Otherwise return all four tables and the full key.
+fn parse_qualified_category(key: &str) -> (Vec<&'static [(&'static str, u32)]>, &str) {
+    let prefixes: &[(&str, &[(&str, u32)])] = &[
+        ("audiobooks ", AUDIOBOOK_GENRES),
+        ("audiobook ", AUDIOBOOK_GENRES),
+        ("ebooks ", EBOOK_GENRES),
+        ("e books ", EBOOK_GENRES),
+        ("ebook ", EBOOK_GENRES),
+        ("e book ", EBOOK_GENRES),
+        ("musicology ", MUSIC_GENRES),
+        ("radio ", RADIO_GENRES),
+    ];
+    for &(prefix, table) in prefixes {
+        if let Some(rest) = key.strip_prefix(prefix) {
+            return (vec![table], rest);
+        }
+    }
+    (vec![AUDIOBOOK_GENRES, EBOOK_GENRES, MUSIC_GENRES, RADIO_GENRES], key)
+}
+
+fn push_unique(v: &mut Vec<u32>, id: u32) {
+    if !v.contains(&id) {
+        v.push(id);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parameter types
 // ---------------------------------------------------------------------------
@@ -568,6 +662,19 @@ struct GetTorrentDetailsParams {
 #[derive(Deserialize, schemars::JsonSchema)]
 struct NoParams {}
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct GetTopTorrentsParams {
+    /// Category filter: a parent name (AudioBooks, E-Books, Musicology, Radio) returns
+    /// all its subcategories. A subcategory name (e.g. Fantasy, Mystery) matches across
+    /// all parents; prefix with parent name to disambiguate (e.g. "AudioBooks Fantasy").
+    /// Omit for all categories.
+    #[serde(default, deserialize_with = "string_or_vec::deserialize")]
+    #[schemars(transform = remove_null_default)]
+    category: Option<Vec<String>>,
+    /// Time period: "all time" (default), "past year", "past month", "past week", "past day".
+    period: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
@@ -610,6 +717,8 @@ impl MamServer {
             p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
+            "",
+            "",
         )
         .await
     }
@@ -650,6 +759,8 @@ impl MamServer {
             p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
+            "",
+            "",
         )
         .await
     }
@@ -688,6 +799,8 @@ impl MamServer {
             p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
+            "",
+            "",
         )
         .await
     }
@@ -723,8 +836,43 @@ impl MamServer {
             p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
+            "",
+            "",
         )
         .await
+    }
+
+    /// Get the top 10 most-snatched torrents on MyAnonamouse (MAM).
+    /// Optionally filter by category (AudioBooks, E-Books, Musicology, Radio, or a specific
+    /// subcategory like Fantasy or Mystery) and time period (past day/week/month/year or all time).
+    #[tool(name = "mam_get_top_torrents", title = "Get Top Torrents", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
+    async fn get_top_torrents(
+        &self,
+        Parameters(p): Parameters<GetTopTorrentsParams>,
+    ) -> Result<String, String> {
+        let (main_cats, sub_cats) = match p.category.as_deref() {
+            Some(cats) if !cats.is_empty() => lookup_top10_categories(cats)?,
+            _ => (vec![], vec![]),
+        };
+        let (start_date, end_date) = parse_period(p.period.as_deref().unwrap_or(""))?;
+        let period_label = p.period.as_deref().unwrap_or("all time");
+
+        let resp = self.execute_search(
+            "",
+            main_cats,
+            sub_cats,
+            vec![],
+            "snatchedDesc",
+            "all",
+            None,
+            10,
+            0,
+            &start_date,
+            &end_date,
+        )
+        .await?;
+
+        Ok(Self::format_top10_response(resp, period_label))
     }
 
     /// Return the full category and subcategory table for MyAnonamouse.
@@ -762,6 +910,8 @@ impl MamServer {
             p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
+            "",
+            "",
         )
         .await
     }
@@ -993,6 +1143,7 @@ pub const TOOL_REGISTRY: &[(&str, &str, bool)] = &[
     ("mam_search_music",           "default", true),
     ("mam_search_radio",           "default", true),
     ("mam_get_torrent_details",    "default", true),
+    ("mam_get_top_torrents",       "default", true),
     ("mam_get_ip_info",            "seedbox", false),
     ("mam_search_torrents",        "power",   false),
     ("mam_list_categories",        "power",   false),
@@ -1008,6 +1159,7 @@ pub const ALL_TOOL_NAMES: &[&str] = &[
     "mam_search_music",
     "mam_search_radio",
     "mam_get_torrent_details",
+    "mam_get_top_torrents",
     "mam_get_ip_info",
     "mam_search_torrents",
     "mam_list_categories",
@@ -1044,7 +1196,31 @@ impl MamServer {
         min_seeders: Option<i32>,
         limit: u32,
         offset: u32,
+        start_date: &str,
+        end_date: &str,
     ) -> Result<String, String> {
+        let resp = self.execute_search(
+            query, main_cat, cat, lang, sort_type, search_type,
+            min_seeders, limit, offset, start_date, end_date,
+        ).await?;
+        Ok(Self::format_search_response(resp, query))
+    }
+
+    /// Execute a search against the MAM API and return the parsed response.
+    async fn execute_search(
+        &self,
+        query: &str,
+        main_cat: Vec<u32>,
+        cat: Vec<u32>,
+        lang: Vec<u32>,
+        sort_type: &str,
+        search_type: &str,
+        min_seeders: Option<i32>,
+        limit: u32,
+        offset: u32,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<SearchResponse, String> {
         let mut tor = serde_json::json!({
             "text": query,
             "srchIn": ["title", "author", "narrator", "series"],
@@ -1053,8 +1229,8 @@ impl MamServer {
             "main_cat": main_cat,
             "cat": cat,
             "browseFlagsHideVsShow": "0",
-            "startDate": "",
-            "endDate": "",
+            "startDate": start_date,
+            "endDate": end_date,
             "hash": "",
             "sortType": sort_type,
             "startNumber": offset,
@@ -1094,17 +1270,15 @@ impl MamServer {
             if v.get("data").is_none() {
                 if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
                     if msg.contains("Nothing returned") {
-                        return Ok(format!("No results found for \"{query}\"."));
+                        return Ok(SearchResponse { data: vec![], total: 0, found: 0 });
                     }
                     return Err(format!("Search error: {msg}"));
                 }
             }
         }
 
-        let parsed: SearchResponse = serde_json::from_str(&text)
-            .map_err(|e| format!("Failed to parse search response: {e}\nBody: {text}"))?;
-
-        Ok(Self::format_search_response(parsed, query))
+        serde_json::from_str(&text)
+            .map_err(|e| format!("Failed to parse search response: {e}\nBody: {text}"))
     }
 
     // --- Response formatters ---
@@ -1185,6 +1359,89 @@ impl MamServer {
 
             if let Some(added) = &t.added {
                 out.push_str(&format!("   Added:     {added}\n"));
+            }
+
+            out.push_str(&format!("   ID:        {}\n", t.id));
+
+            if let Some(dl) = &t.dl {
+                if !dl.is_empty() {
+                    out.push_str(&format!(
+                        "   DL URL:    {}/tor/download.php/{dl}\n",
+                        crate::mam::BASE_URL
+                    ));
+                }
+            }
+        }
+
+        out
+    }
+
+    fn format_top10_response(resp: SearchResponse, period: &str) -> String {
+        if resp.data.is_empty() {
+            return format!("No top torrents found for {period}.");
+        }
+
+        let mut out = format!("Top {} most-snatched torrents ({})\n", resp.data.len(), period);
+
+        for (i, t) in resp.data.iter().enumerate() {
+            out.push_str(&format!("\n{}. {}\n", i + 1, t.title));
+
+            if let Some(cat) = &t.catname {
+                out.push_str(&format!("   Category:  {cat}\n"));
+            }
+            if let Some(snatches) = t.times_completed {
+                out.push_str(&format!("   Snatches:  {snatches}\n"));
+            }
+            if let Some(size) = &t.size {
+                out.push_str(&format!("   Size:      {size}\n"));
+            }
+
+            let authors = t
+                .author_info
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .map(Self::parse_name_map)
+                .unwrap_or_default();
+            if !authors.is_empty() {
+                out.push_str(&format!("   Authors:   {}\n", authors.join(", ")));
+            }
+
+            let narrators = t
+                .narrator_info
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .map(Self::parse_name_map)
+                .unwrap_or_default();
+            if !narrators.is_empty() {
+                out.push_str(&format!("   Narrators: {}\n", narrators.join(", ")));
+            }
+
+            let series = t
+                .series_info
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .map(Self::parse_series_map)
+                .unwrap_or_default();
+            if !series.is_empty() {
+                out.push_str(&format!("   Series:    {}\n", series.join(", ")));
+            }
+
+            if t.seeders.is_some() || t.leechers.is_some() {
+                out.push_str(&format!(
+                    "   S/L:       {}/{}\n",
+                    t.seeders.map_or("-".to_string(), |n| n.to_string()),
+                    t.leechers.map_or("-".to_string(), |n| n.to_string()),
+                ));
+            }
+
+            let is_free = t.free.unwrap_or(0) == 1;
+            let is_vip = t.vip.unwrap_or(0) == 1;
+            if is_free || is_vip {
+                let flags: Vec<&str> = [is_free.then_some("Free"), is_vip.then_some("VIP")]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                out.push_str(&format!("   Flags:     {}\n", flags.join(", ")));
             }
 
             out.push_str(&format!("   ID:        {}\n", t.id));
