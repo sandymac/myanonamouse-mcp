@@ -1,6 +1,11 @@
 // Copyright (c) 2026 Sandy McArthur, Jr.
 // SPDX-License-Identifier: MIT
 
+pub(crate) mod api;
+pub(crate) mod format;
+pub(crate) mod lookup;
+pub(crate) mod types;
+
 use anyhow::anyhow;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde::Deserialize;
