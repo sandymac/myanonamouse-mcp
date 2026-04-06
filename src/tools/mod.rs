@@ -384,7 +384,7 @@ impl MamServer {
         &self,
         Parameters(_): Parameters<NoParams>,
     ) -> Result<String, String> {
-        Ok(serde_json::json!({
+        let categories = serde_json::json!({
             "main_categories": [
                 {"id": 13, "name": "AudioBooks"},
                 {"id": 14, "name": "E-Books"},
@@ -448,7 +448,8 @@ impl MamServer {
                     {"id": 130, "name": "Drama"}, {"id": 132, "name": "Reading"}
                 ]
             }
-        }).to_string())
+        });
+        Ok(toon_format::encode_default(&categories).unwrap_or_else(|_| categories.to_string()))
     }
 
     /// Search for torrents on MyAnonamouse (MAM) across all categories with full parameter
@@ -526,6 +527,7 @@ impl MamServer {
     async fn get_ip_info(&self, Parameters(_): Parameters<NoParams>) -> Result<String, String> {
         crate::mam::get_ip_info(&self.client)
             .await
+            .map(|json| crate::mam::json_to_toon(&json))
             .map_err(|e| e.to_string())
     }
 

@@ -41,6 +41,15 @@ pub async fn get_ip_info(client: &reqwest::Client) -> anyhow::Result<String> {
     Ok(body)
 }
 
+/// Convert a raw JSON string to TOON format for token-efficient LLM output.
+/// Falls back to the original JSON string if parsing or encoding fails.
+pub(crate) fn json_to_toon(json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(v) => toon_format::encode_default(&v).unwrap_or_else(|_| json.to_string()),
+        Err(_) => json.to_string(),
+    }
+}
+
 /// Produce a human-readable error string for MAM HTTP errors, with LLM hints where useful.
 pub fn enrich_error(status: u16, body: &str) -> String {
     let hint = match status {

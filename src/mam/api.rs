@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Sandy McArthur, Jr.
 // SPDX-License-Identifier: MIT
 
-use super::{enrich_error, BASE_URL};
+use super::{enrich_error, json_to_toon, BASE_URL};
 
 pub(crate) async fn do_search(
     client: &reqwest::Client,
@@ -63,14 +63,16 @@ pub(crate) async fn do_search(
         if v.get("data").is_none() {
             if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
                 if msg.contains("Nothing returned") {
-                    return Ok(r#"{"data":[],"total":0,"found":0}"#.to_string());
+                    return Ok(r#"data[0]:
+total: 0
+found: 0"#.to_string());
                 }
                 return Err(format!("Search error: {msg}"));
             }
         }
     }
 
-    Ok(text)
+    Ok(json_to_toon(&text))
 }
 
 pub(crate) async fn get_user_data(
@@ -99,7 +101,8 @@ pub(crate) async fn get_user_data(
         return Err(enrich_error(status.as_u16(), &text));
     }
 
-    resp.text().await.map_err(|e| format!("Failed to read user data response: {e}"))
+    let text = resp.text().await.map_err(|e| format!("Failed to read user data response: {e}"))?;
+    Ok(json_to_toon(&text))
 }
 
 pub(crate) async fn get_user_bonus_history(
@@ -128,7 +131,8 @@ pub(crate) async fn get_user_bonus_history(
         return Err(enrich_error(status.as_u16(), &text));
     }
 
-    resp.text().await.map_err(|e| format!("Failed to read bonus history response: {e}"))
+    let text = resp.text().await.map_err(|e| format!("Failed to read bonus history response: {e}"))?;
+    Ok(json_to_toon(&text))
 }
 
 pub(crate) async fn get_torrent_details(
@@ -176,14 +180,16 @@ pub(crate) async fn get_torrent_details(
         if v.get("data").is_none() {
             if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
                 if msg.contains("Nothing returned") {
-                    return Ok(r#"{"data":[],"total":0,"found":0}"#.to_string());
+                    return Ok(r#"data[0]:
+total: 0
+found: 0"#.to_string());
                 }
                 return Err(format!("Lookup error: {msg}"));
             }
         }
     }
 
-    Ok(text)
+    Ok(json_to_toon(&text))
 }
 
 pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String, String> {
@@ -213,5 +219,5 @@ pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String
         }
     }
 
-    Ok(text)
+    Ok(json_to_toon(&text))
 }
