@@ -4,6 +4,55 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+/// Request parameters for the MAM search API (`/tor/js/loadSearchJSONbasic.php`).
+/// All fields are optional except `text`; omitted fields use MAM defaults.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct SearchRequest {
+    // -- tor object fields --
+    /// Search query text. Empty string searches everything.
+    pub(crate) text: String,
+    /// Fields to search in (title, author, narrator, series, description, tags, filenames, fileTypes).
+    /// None = default (title + author + narrator + series).
+    pub(crate) srch_in: Option<Vec<String>>,
+    /// Torrent filter: all, active, inactive, fl, fl-VIP, VIP, nVIP, nMeta.
+    pub(crate) search_type: Option<String>,
+    /// Main category IDs (13=AudioBooks, 14=E-Books, 15=Musicology, 16=Radio).
+    pub(crate) main_cat: Vec<u32>,
+    /// Subcategory IDs.
+    pub(crate) cat: Vec<u32>,
+    /// Language IDs.
+    pub(crate) browse_lang: Vec<u32>,
+    /// Sort order (e.g. "dateDesc", "snatchedDesc", "default").
+    pub(crate) sort_type: Option<String>,
+    /// Pagination offset.
+    pub(crate) start_number: u32,
+    /// Start date filter (unix timestamp string or YYYY-MM-DD).
+    pub(crate) start_date: Option<String>,
+    /// End date filter (unix timestamp string or YYYY-MM-DD).
+    pub(crate) end_date: Option<String>,
+    /// Minimum seeders.
+    pub(crate) min_seeders: Option<i32>,
+    /// browseFlagsHideVsShow value. Defaults to "0".
+    pub(crate) browse_flags_hide_vs_show: Option<String>,
+    // -- top-level fields --
+    /// Results per page (5-1000).
+    pub(crate) perpage: Option<u32>,
+    /// Include download hash in results. Defaults to true.
+    pub(crate) dl_link: Option<bool>,
+    /// Include full description in results.
+    pub(crate) description: Option<bool>,
+    /// Include ISBN in results.
+    pub(crate) isbn: Option<bool>,
+    /// Include media info in results.
+    pub(crate) media_info: Option<bool>,
+    /// Limit to user's snatched torrents.
+    pub(crate) my_snatched: Option<bool>,
+    /// Include thumbnail URLs.
+    pub(crate) thumbnail: Option<bool>,
+    /// Include bookmark status.
+    pub(crate) bookmarks: Option<bool>,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct SearchResponse {
     pub(crate) data: Vec<TorrentResult>,

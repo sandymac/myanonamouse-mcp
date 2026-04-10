@@ -7,54 +7,74 @@ use super::{enrich_error, BASE_URL};
 use super::format::{
     format_bonus_history, format_search_response, format_torrent_detail, format_user_data,
 };
-use super::types::{BonusEntry, SearchResponse, TorrentDetail, UserDataResponse};
+use super::types::{BonusEntry, SearchRequest, SearchResponse, TorrentDetail, UserDataResponse};
 
 pub(crate) async fn do_search(
     client: &reqwest::Client,
-    query: &str,
-    main_cat: Vec<u32>,
-    cat: Vec<u32>,
-    lang: Vec<u32>,
-    sort_type: &str,
-    search_type: &str,
-    min_seeders: Option<i32>,
-    limit: u32,
-    offset: u32,
-    srch_in: Option<Vec<String>>,
-) -> Result<String, String> {
-    let srch_in_val = if let Some(fields) = srch_in {
+    request: &SearchRequest,
+) -> Result<SearchResponse, String> {
+    let srch_in_val = if let Some(ref fields) = request.srch_in {
         serde_json::json!(fields)
     } else {
         serde_json::json!(["title", "author", "narrator", "series"])
     };
 
     let mut tor = serde_json::json!({
-        "text": query,
+        "text": request.text,
         "srchIn": srch_in_val,
-        "searchType": search_type,
+        "searchType": request.search_type.as_deref().unwrap_or("all"),
         "searchIn": "torrents",
-        "main_cat": main_cat,
-        "cat": cat,
-        "browseFlagsHideVsShow": "0",
-        "startDate": "",
-        "endDate": "",
-        "hash": "",
-        "sortType": sort_type,
-        "startNumber": offset,
+        "browseFlagsHideVsShow": request.browse_flags_hide_vs_show.as_deref().unwrap_or("0"),
+        "startNumber": request.start_number,
     });
-    // Omit browse_lang when empty — sending [] breaks the MAM search engine
-    if !lang.is_empty() {
-        tor["browse_lang"] = serde_json::json!(lang);
+    if !request.main_cat.is_empty() {
+        tor["main_cat"] = serde_json::json!(request.main_cat);
     }
-    if let Some(min) = min_seeders {
+    if !request.cat.is_empty() {
+        tor["cat"] = serde_json::json!(request.cat);
+    }
+    // Omit browse_lang when empty — sending [] breaks the MAM search engine
+    if !request.browse_lang.is_empty() {
+        tor["browse_lang"] = serde_json::json!(request.browse_lang);
+    }
+    if let Some(ref sort) = request.sort_type {
+        tor["sortType"] = serde_json::json!(sort);
+    }
+    if let Some(ref d) = request.start_date {
+        tor["startDate"] = serde_json::json!(d);
+    }
+    if let Some(ref d) = request.end_date {
+        tor["endDate"] = serde_json::json!(d);
+    }
+    if let Some(min) = request.min_seeders {
         tor["minSeeders"] = serde_json::json!(min);
     }
-    let body = serde_json::json!({
+
+    let mut body = serde_json::json!({
         "tor": tor,
-        "perpage": limit,
-        "dlLink": "true",
-        "thumbnail": "false",
+        "perpage": request.perpage.unwrap_or(25),
     });
+    if request.dl_link.unwrap_or(true) {
+        body["dlLink"] = serde_json::json!("true");
+    }
+    if request.description.unwrap_or(false) {
+        body["description"] = serde_json::json!("");
+    }
+    if request.isbn.unwrap_or(false) {
+        body["isbn"] = serde_json::json!("");
+    }
+    if request.media_info.unwrap_or(false) {
+        body["mediaInfo"] = serde_json::json!("");
+    }
+    if request.my_snatched.unwrap_or(false) {
+        body["my_snatched"] = serde_json::json!("");
+    }
+    if let Some(thumb) = request.thumbnail {
+        body["thumbnail"] = serde_json::json!(if thumb { "true" } else { "false" });
+    }
+    if request.bookmarks.unwrap_or(false) {
+        body["bookmarks"] = serde_json::json!("true");
+    }
 
     let resp = client
         .post(format!("{BASE_URL}/tor/js/loadSearchJSONbasic.php"))
@@ -76,17 +96,15 @@ pub(crate) async fn do_search(
         if v.get("data").is_none() {
             if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
                 if msg.contains("Nothing returned") {
-                    return Ok(format!("No results found for \"{query}\"."));
+                    return Ok(SearchResponse { data: vec![], total: 0, found: 0 });
                 }
                 return Err(format!("Search error: {msg}"));
             }
         }
     }
 
-    let parsed: SearchResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("Failed to parse search response: {e}\nBody: {text}"))?;
-
-    Ok(format_search_response(parsed, query))
+    serde_json::from_str(&text)
+        .map_err(|e| format!("Failed to parse search response: {e}\nBody: {text}"))
 }
 
 pub(crate) async fn get_user_data(
@@ -230,64 +248,30 @@ pub(crate) async fn get_top_10(
 ) -> Result<String, String> {
     let now = chrono::Utc::now().timestamp();
     let (start_date, end_date, period_label) = match period {
-        Some("day") => ((now - 86400).to_string(), now.to_string(), "past day"),
-        Some("week") => ((now - 7 * 86400).to_string(), now.to_string(), "past week"),
-        Some("month") => ((now - 30 * 86400).to_string(), now.to_string(), "past month"),
-        Some("year") => ((now - 365 * 86400).to_string(), now.to_string(), "past year"),
-        _ => (String::new(), String::new(), "all time"),
+        Some("day") => (Some((now - 86400).to_string()), Some(now.to_string()), "past day"),
+        Some("week") => (Some((now - 7 * 86400).to_string()), Some(now.to_string()), "past week"),
+        Some("month") => (Some((now - 30 * 86400).to_string()), Some(now.to_string()), "past month"),
+        Some("year") => (Some((now - 365 * 86400).to_string()), Some(now.to_string()), "past year"),
+        _ => (None, None, "all time"),
     };
 
     let cat = if cat.is_empty() && main_cat.is_empty() { vec![0] } else { cat };
 
-    let tor = serde_json::json!({
-        "text": "",
-        "searchType": "all",
-        "searchIn": "torrents",
-        "main_cat": main_cat,
-        "cat": cat,
-        "sortType": "snatchedDesc",
-        "startNumber": 0,
-        "startDate": start_date,
-        "endDate": end_date,
-    });
+    let request = SearchRequest {
+        main_cat,
+        cat,
+        sort_type: Some("snatchedDesc".into()),
+        start_date,
+        end_date,
+        perpage: Some(10),
+        dl_link: Some(true),
+        bookmarks: Some(true),
+        ..Default::default()
+    };
 
-    let body = serde_json::json!({
-        "tor": tor,
-        "perpage": 10,
-        "dlLink": "true",
-        "bookmarks": "true",
-    });
-
-    let resp = client
-        .post(format!("{BASE_URL}/tor/js/loadSearchJSONbasic.php"))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(enrich_error(status.as_u16(), &text));
-    }
-
-    let text = resp.text().await.map_err(|e| format!("Failed to read response: {e}"))?;
-
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-        if v.get("data").is_none() {
-            if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
-                if msg.contains("Nothing returned") {
-                    return Ok("No results found for the selected period/category.".to_string());
-                }
-                return Err(format!("Search error: {msg}"));
-            }
-        }
-    }
-
-    let parsed: SearchResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("Failed to parse response: {e}\nBody: {text}"))?;
-
-    Ok(format_search_response(parsed, &format!("Top 10 ({period_label})")))
+    let label = format!("Top 10 ({period_label})");
+    let resp = do_search(client, &request).await?;
+    Ok(format_search_response(resp, &label))
 }
 
 pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String, String> {

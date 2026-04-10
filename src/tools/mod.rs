@@ -259,20 +259,20 @@ impl MamServer {
             _ => vec![],
         };
         let sort = crate::mam::lookup::parse_sort(p.sort.as_deref().unwrap_or(""))?;
-        crate::mam::api::do_search(
-            &self.client,
-            &p.query,
-            vec![13],
+        let req = crate::mam::types::SearchRequest {
+            text: p.query.clone(),
+            main_cat: vec![13],
             cat,
-            lang,
-            sort,
-            p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
-            p.limit.unwrap_or(20).min(100),
-            p.offset.unwrap_or(0),
-            None,
-        )
-        .await
+            browse_lang: lang,
+            sort_type: Some(sort.into()),
+            search_type: p.search_type.clone(),
+            min_seeders: p.min_seeders,
+            perpage: Some(p.limit.unwrap_or(20).min(100)),
+            start_number: p.offset.unwrap_or(0),
+            ..Default::default()
+        };
+        let resp = crate::mam::api::do_search(&self.client, &req).await?;
+        Ok(crate::mam::format::format_search_response(resp, &p.query))
     }
 
     /// Search for ebooks on MyAnonamouse (MAM).
@@ -301,20 +301,20 @@ impl MamServer {
             _ => vec![],
         };
         let sort = crate::mam::lookup::parse_sort(p.sort.as_deref().unwrap_or(""))?;
-        crate::mam::api::do_search(
-            &self.client,
-            &p.query,
-            vec![14],
+        let req = crate::mam::types::SearchRequest {
+            text: p.query.clone(),
+            main_cat: vec![14],
             cat,
-            lang,
-            sort,
-            p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
-            p.limit.unwrap_or(20).min(100),
-            p.offset.unwrap_or(0),
-            None,
-        )
-        .await
+            browse_lang: lang,
+            sort_type: Some(sort.into()),
+            search_type: p.search_type.clone(),
+            min_seeders: p.min_seeders,
+            perpage: Some(p.limit.unwrap_or(20).min(100)),
+            start_number: p.offset.unwrap_or(0),
+            ..Default::default()
+        };
+        let resp = crate::mam::api::do_search(&self.client, &req).await?;
+        Ok(crate::mam::format::format_search_response(resp, &p.query))
     }
 
     /// Search for musicology content on MyAnonamouse (MAM) — sheet music, instructional
@@ -341,20 +341,20 @@ impl MamServer {
             _ => vec![],
         };
         let sort = crate::mam::lookup::parse_sort(p.sort.as_deref().unwrap_or(""))?;
-        crate::mam::api::do_search(
-            &self.client,
-            &p.query,
-            vec![15],
+        let req = crate::mam::types::SearchRequest {
+            text: p.query.clone(),
+            main_cat: vec![15],
             cat,
-            lang,
-            sort,
-            p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
-            p.limit.unwrap_or(20).min(100),
-            p.offset.unwrap_or(0),
-            None,
-        )
-        .await
+            browse_lang: lang,
+            sort_type: Some(sort.into()),
+            search_type: p.search_type.clone(),
+            min_seeders: p.min_seeders,
+            perpage: Some(p.limit.unwrap_or(20).min(100)),
+            start_number: p.offset.unwrap_or(0),
+            ..Default::default()
+        };
+        let resp = crate::mam::api::do_search(&self.client, &req).await?;
+        Ok(crate::mam::format::format_search_response(resp, &p.query))
     }
 
     /// Search for radio content on MyAnonamouse (MAM) — BBC Radio, podcasts, dramatisations,
@@ -378,20 +378,20 @@ impl MamServer {
             _ => vec![],
         };
         let sort = crate::mam::lookup::parse_sort(p.sort.as_deref().unwrap_or(""))?;
-        crate::mam::api::do_search(
-            &self.client,
-            &p.query,
-            vec![16],
+        let req = crate::mam::types::SearchRequest {
+            text: p.query.clone(),
+            main_cat: vec![16],
             cat,
-            lang,
-            sort,
-            p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
-            p.limit.unwrap_or(20).min(100),
-            p.offset.unwrap_or(0),
-            None,
-        )
-        .await
+            browse_lang: lang,
+            sort_type: Some(sort.into()),
+            search_type: p.search_type.clone(),
+            min_seeders: p.min_seeders,
+            perpage: Some(p.limit.unwrap_or(20).min(100)),
+            start_number: p.offset.unwrap_or(0),
+            ..Default::default()
+        };
+        let resp = crate::mam::api::do_search(&self.client, &req).await?;
+        Ok(crate::mam::format::format_search_response(resp, &p.query))
     }
 
     /// Return the full category and subcategory table for MyAnonamouse.
@@ -432,20 +432,21 @@ impl MamServer {
             Some(names) if !names.is_empty() => crate::mam::lookup::map_languages(names)?,
             _ => vec![],
         };
-        crate::mam::api::do_search(
-            &self.client,
-            &p.query,
-            p.main_cat.unwrap_or_default(),
-            p.cat.unwrap_or_default(),
-            lang,
-            sort,
-            p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
-            p.limit.unwrap_or(20).min(100),
-            p.offset.unwrap_or(0),
-            p.srch_in,
-        )
-        .await
+        let req = crate::mam::types::SearchRequest {
+            text: p.query.clone(),
+            main_cat: p.main_cat.unwrap_or_default(),
+            cat: p.cat.unwrap_or_default(),
+            browse_lang: lang,
+            sort_type: Some(sort.into()),
+            search_type: p.search_type.clone(),
+            min_seeders: p.min_seeders,
+            perpage: Some(p.limit.unwrap_or(20).min(100)),
+            start_number: p.offset.unwrap_or(0),
+            srch_in: p.srch_in,
+            ..Default::default()
+        };
+        let resp = crate::mam::api::do_search(&self.client, &req).await?;
+        Ok(crate::mam::format::format_search_response(resp, &p.query))
     }
 
     /// Fetch the top 10 most-snatched torrents on MyAnonamouse (MAM).
