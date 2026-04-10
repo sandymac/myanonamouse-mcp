@@ -229,20 +229,17 @@ pub(crate) async fn get_top_10(
     period: Option<&str>,
 ) -> Result<String, String> {
     let now = chrono::Utc::now().timestamp();
-    let start_date = match period {
-        Some("day") => (now - 86400).to_string(),
-        Some("week") => (now - 7 * 86400).to_string(),
-        Some("month") => (now - 30 * 86400).to_string(),
-        Some("year") => (now - 365 * 86400).to_string(),
-        _ => "".to_string(),
-    };
-    let end_date = if start_date.is_empty() {
-        "".to_string()
-    } else {
-        now.to_string()
+    let (start_date, end_date, period_label) = match period {
+        Some("day") => ((now - 86400).to_string(), now.to_string(), "past day"),
+        Some("week") => ((now - 7 * 86400).to_string(), now.to_string(), "past week"),
+        Some("month") => ((now - 30 * 86400).to_string(), now.to_string(), "past month"),
+        Some("year") => ((now - 365 * 86400).to_string(), now.to_string(), "past year"),
+        _ => (String::new(), String::new(), "all time"),
     };
 
-    let mut tor = serde_json::json!({
+    let cat = if cat.is_empty() && main_cat.is_empty() { vec![0] } else { cat };
+
+    let tor = serde_json::json!({
         "text": "",
         "searchType": "all",
         "searchIn": "torrents",
@@ -253,10 +250,6 @@ pub(crate) async fn get_top_10(
         "startDate": start_date,
         "endDate": end_date,
     });
-
-    if cat.is_empty() && main_cat.is_empty() {
-        tor["cat"] = serde_json::json!([0]);
-    }
 
     let body = serde_json::json!({
         "tor": tor,
@@ -279,16 +272,21 @@ pub(crate) async fn get_top_10(
     }
 
     let text = resp.text().await.map_err(|e| format!("Failed to read response: {e}"))?;
+
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+        if v.get("data").is_none() {
+            if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
+                if msg.contains("Nothing returned") {
+                    return Ok("No results found for the selected period/category.".to_string());
+                }
+                return Err(format!("Search error: {msg}"));
+            }
+        }
+    }
+
     let parsed: SearchResponse = serde_json::from_str(&text)
         .map_err(|e| format!("Failed to parse response: {e}\nBody: {text}"))?;
 
-    let period_label = match period {
-        Some("day") => "past day",
-        Some("week") => "past week",
-        Some("month") => "past month",
-        Some("year") => "past year",
-        _ => "all time",
-    };
     Ok(format_search_response(parsed, &format!("Top 10 ({period_label})")))
 }
 

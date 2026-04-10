@@ -414,6 +414,19 @@ impl MamServer {
         &self,
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<String, String> {
+        const VALID_SRCH_IN: &[&str] = &[
+            "title", "author", "description", "tags", "series", "narrator", "filenames", "fileTypes",
+        ];
+        if let Some(ref fields) = p.srch_in {
+            for f in fields {
+                if !VALID_SRCH_IN.contains(&f.as_str()) {
+                    return Err(format!(
+                        "Invalid srch_in value \"{f}\". Valid values: {}",
+                        VALID_SRCH_IN.join(", ")
+                    ));
+                }
+            }
+        }
         let sort = crate::mam::lookup::parse_sort(p.sort.as_deref().unwrap_or(""))?;
         let lang = match p.lang.as_deref() {
             Some(names) if !names.is_empty() => crate::mam::lookup::map_languages(names)?,
