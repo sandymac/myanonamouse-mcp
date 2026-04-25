@@ -123,6 +123,8 @@ The server accepts these flags:
 - `--transport` — `stdio` (default) or `http`
 - `--http-bind` — bind address for HTTP transport (default `0.0.0.0:8080`)
 - `--api-token` / `MAM_API_TOKEN` env — Bearer token for HTTP transport authentication
+- `--oauth-issuer` / `MAM_OAUTH_ISSUER` env — base URL of this server as the OAuth 2.1 issuer; enables the embedded OAuth authorization server for HTTP transport
+- `--oauth-state-file` / `MAM_OAUTH_STATE_FILE` env — path to a JSON file used to persist OAuth client registrations and access/refresh tokens across restarts
 - `--enable-power-tools` — enable `search_torrents` + `list_categories`
 - `--enable-user-tools` — enable `get_user_data` + `get_user_bonus_history`
 - `--enable-seedbox` — enable `update_seedbox_ip`
@@ -147,3 +149,18 @@ All log output goes to **stderr** via `tracing` — never stdout, which is reser
 **Stdio** (default): the server speaks MCP over stdin/stdout. This is the transport used by Claude Desktop.
 
 **HTTP**: the server listens on the configured bind address and exposes the MCP endpoint at `/mcp`. Each connection gets its own `MamServer` instance. Requests are authenticated via a Bearer token if `--api-token` is set. The server applies CORS and HTTP tracing middleware.
+
+### OAuth State Persistence
+
+By default OAuth state is held in memory only — every registered client, access token, and refresh token is lost on restart, so every MCP client has to re-register and re-consent. Passing `--oauth-state-file <PATH>` (or `MAM_OAUTH_STATE_FILE=<PATH>`) activates file-backed persistence for long-lived state.
+
+**What is persisted**: `clients` (dynamic client registrations), `access_tokens`, `refresh_tokens`.
+**What is not persisted**: authorization codes (10-min TTL) and pending consent-page sessions (5-min TTL). An in-flight OAuth flow interrupted by a restart simply restarts from the beginning.
+
+**Write strategy**: mutations set a dirty flag; a background task flushes every ~2 s if dirty. A final flush runs on graceful shutdown (Ctrl-C) to capture the last-interval window. Writes are atomic: JSON is written to `<path>.tmp` and then renamed over `<path>`.
+
+**File permissions**: on Unix the file is chmod'd to `0600` because it contains bearer tokens. On Windows the file inherits default ACLs — choose a path inside a user-only directory.
+
+**Missing file on startup**: treated as empty. First-run behaviour is unchanged.
+
+**Corrupt or unknown-version file**: logged as a `WARN`, renamed to `<path>.corrupt-<unix_ts>` for recovery, and startup proceeds with empty state rather than crashing. Clients re-register; no data beyond OAuth sessions is affected.

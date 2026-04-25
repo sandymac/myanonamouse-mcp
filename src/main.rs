@@ -38,6 +38,13 @@ struct Cli {
     #[arg(long, env = "MAM_OAUTH_ISSUER")]
     oauth_issuer: Option<String>,
 
+    /// Path to a JSON file used to persist OAuth client registrations, access tokens,
+    /// and refresh tokens across restarts. Only meaningful with --oauth-issuer.
+    /// When unset, OAuth state is in-memory only and is lost on restart.
+    /// On Unix the file is chmod'd to 0600 because it contains bearer tokens.
+    #[arg(long, env = "MAM_OAUTH_STATE_FILE", value_name = "PATH")]
+    oauth_state_file: Option<std::path::PathBuf>,
+
     /// Enable the search_torrents (full cross-category power search) and list_categories tools.
     #[arg(long, default_value_t = false)]
     enable_power_tools: bool,
@@ -195,16 +202,31 @@ async fn main() -> anyhow::Result<()> {
                 )
             };
 
+            let mut shutdown_oauth_state: Option<Arc<oauth::state::OAuthState>> = None;
+
             let app = if let Some(oauth_issuer) = cli.oauth_issuer {
                 // --- OAuth 2.1 mode (optionally dual-mode with static api_token) ---
                 info!(issuer = %oauth_issuer, "OAuth 2.1 authorization server enabled");
 
                 let oauth_state = Arc::new(
-                    oauth::state::OAuthState::new(oauth_issuer, cli.api_token.clone()),
+                    oauth::state::OAuthState::new_with_persistence(
+                        oauth_issuer,
+                        cli.api_token.clone(),
+                        cli.oauth_state_file.clone(),
+                    )
+                    .await?,
                 );
+
+                if let Some(ref path) = cli.oauth_state_file {
+                    info!(path = %path.display(), "OAuth state persistence enabled");
+                }
 
                 // Spawn background cleanup task
                 let _cleanup = oauth::cleanup::spawn_cleanup(oauth_state.clone());
+                // Spawn debounced persistence flusher (no-op when persist_path is None)
+                oauth::persist::spawn_persistence(oauth_state.clone());
+
+                shutdown_oauth_state = Some(oauth_state.clone());
 
                 // MCP route with OAuth auth middleware and permissive CORS
                 let mcp_router = Router::new()
@@ -268,11 +290,19 @@ async fn main() -> anyhow::Result<()> {
             info!("Listening on http://{}/mcp", cli.http_bind);
 
             axum::serve(listener, app)
-                .with_graceful_shutdown(async {
+                .with_graceful_shutdown(async move {
                     tokio::signal::ctrl_c()
                         .await
                         .expect("failed to listen for ctrl-c");
                     info!("Shutting down HTTP server");
+                    if let Some(state) = shutdown_oauth_state {
+                        if state.has_persist_path() {
+                            match state.flush().await {
+                                Ok(()) => info!("Flushed OAuth state to disk"),
+                                Err(e) => warn!(error = %e, "Final OAuth state flush failed"),
+                            }
+                        }
+                    }
                 })
                 .await?;
         }
