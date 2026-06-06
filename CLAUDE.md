@@ -47,12 +47,12 @@ MyAnonamouse uses a **session cookie** named `mam_id`. There is no login endpoin
 
 - **Supply via:** `--mam-session <value>` CLI arg or `MAM_SESSION` environment variable
 - **How to obtain:** Log into MyAnonamouse, go to Preferences → Security tab, copy the `mam_id` value
-- **Transmission:** Injected as a `Cookie: mam_id=<value>` header on every outbound HTTP request
+- **Transmission:** Sent as a `Cookie: mam_id=<value>` header on every outbound HTTP request via a custom cookie store (`SessionJar` in `src/mam/mod.rs`) that only sends/accepts cookies for `*.myanonamouse.net` hosts
 - **Headers set on every request:**
   - `Cookie: mam_id=<value>`
   - `Content-Type: application/json`
   - `User-Agent: Mozilla/5.0` (browser spoof required by MAM)
-- **No session management:** The cookie is assumed to be valid; there is no refresh or re-auth logic
+- **Rotation tracking:** MAM rotates `mam_id` via `Set-Cookie` on responses. The `SessionJar` captures the rotated value so subsequent requests use it, and `--state-file` persists it across restarts (see State Persistence below). Startup precedence: if the state file's stored `seed` matches the supplied `MAM_SESSION`, the stored (rotated) `current` value wins; if the user supplies a *new* `MAM_SESSION`, it resets the stored record.
 - **Base URL:** `https://www.myanonamouse.net`
 
 ## Architecture
@@ -74,7 +74,8 @@ A single HTTP client is built once at startup with the `mam_id` cookie and User-
 | `Cargo.toml` | Manifest — dependencies, metadata, binary definition |
 | `Cargo.lock` | Exact dependency versions (kept for binaries) |
 | `src/main.rs` | Entry point — CLI arg parsing, tool-enable/disable flag processing, transport selection, server startup, HTTP auth middleware |
-| `src/mam/mod.rs` | MAM HTTP client — builds the shared client, `get_ip_info` helper, `enrich_error` with LLM hints |
+| `src/mam/mod.rs` | MAM HTTP client — builds the shared client, `SessionJar` cookie store, `get_ip_info` helper, `enrich_error` with LLM hints |
+| `src/persist.rs` | State file persistence — `StateStore` (mam_id session record + OAuth maps), debounced background flusher, atomic writes |
 | `src/tools/mod.rs` | `MamServer` struct + all MCP tool implementations + genre/language/sort lookup tables + server handler |
 | `tests/` | Integration tests |
 | `api-docs/` | MAM API documentation (HTML); `Search-Form-HTML-fragment.html` is the primary source for search parameter names and category/language IDs |
@@ -124,7 +125,7 @@ The server accepts these flags:
 - `--http-bind` — bind address for HTTP transport (default `0.0.0.0:8080`)
 - `--api-token` / `MAM_API_TOKEN` env — Bearer token for HTTP transport authentication
 - `--oauth-issuer` / `MAM_OAUTH_ISSUER` env — base URL of this server as the OAuth 2.1 issuer; enables the embedded OAuth authorization server for HTTP transport
-- `--oauth-state-file` / `MAM_OAUTH_STATE_FILE` env — path to a JSON file used to persist OAuth client registrations and access/refresh tokens across restarts
+- `--state-file` / `MAM_STATE_FILE` env — path to a JSON file used to persist server state across restarts: the current (possibly rotated) `mam_id` session cookie, plus OAuth client registrations and access/refresh tokens when OAuth is enabled (`--oauth-state-file` / `MAM_OAUTH_STATE_FILE` are accepted as legacy aliases)
 - `--enable-power-tools` — enable `search_torrents` + `list_categories`
 - `--enable-user-tools` — enable `get_user_data` + `get_user_bonus_history`
 - `--enable-seedbox` — enable `update_seedbox_ip`
@@ -150,17 +151,19 @@ All log output goes to **stderr** via `tracing` — never stdout, which is reser
 
 **HTTP**: the server listens on the configured bind address and exposes the MCP endpoint at `/mcp`. Each connection gets its own `MamServer` instance. Requests are authenticated via a Bearer token if `--api-token` is set. The server applies CORS and HTTP tracing middleware.
 
-### OAuth State Persistence
+### State Persistence
 
-By default OAuth state is held in memory only — every registered client, access token, and refresh token is lost on restart, so every MCP client has to re-register and re-consent. Passing `--oauth-state-file <PATH>` (or `MAM_OAUTH_STATE_FILE=<PATH>`) activates file-backed persistence for long-lived state.
+By default all state is held in memory only — the rotated `mam_id` is lost on restart (the server falls back to the original `MAM_SESSION` value, which MAM may have invalidated), and every registered OAuth client, access token, and refresh token is lost, so every MCP client has to re-register and re-consent. Passing `--state-file <PATH>` (or `MAM_STATE_FILE=<PATH>`) activates file-backed persistence for long-lived state. It works on every transport; the legacy `--oauth-state-file` / `MAM_OAUTH_STATE_FILE` spellings still work.
 
-**What is persisted**: `clients` (dynamic client registrations), `access_tokens`, `refresh_tokens`.
+**What is persisted**: `mam_session` (the `seed` value the user supplied plus the `current` rotated cookie), `clients` (dynamic client registrations), `access_tokens`, `refresh_tokens`.
 **What is not persisted**: authorization codes (10-min TTL) and pending consent-page sessions (5-min TTL). An in-flight OAuth flow interrupted by a restart simply restarts from the beginning.
 
-**Write strategy**: mutations set a dirty flag; a background task flushes every ~2 s if dirty. A final flush runs on graceful shutdown (Ctrl-C) to capture the last-interval window. Writes are atomic: JSON is written to `<path>.tmp` and then renamed over `<path>`.
+**mam_id resolution at startup**: if the stored `seed` matches the supplied `MAM_SESSION`, the stored `current` (rotated) value is used. If `MAM_SESSION` differs from the stored seed, the user supplied a fresh cookie — the stored record is discarded and re-seeded. This means refreshing a dead cookie is just updating `MAM_SESSION` as before; no need to delete the state file.
 
-**File permissions**: on Unix the file is chmod'd to `0600` because it contains bearer tokens. On Windows the file inherits default ACLs — choose a path inside a user-only directory.
+**Write strategy**: mutations set a dirty flag; a background task flushes every ~2 s if dirty (it also picks up any `mam_id` rotation from the `SessionJar` each tick). A final flush runs on shutdown — Ctrl-C for HTTP, transport close (even abrupt EOF) for stdio. Writes are atomic: JSON is written to `<path>.tmp` and then renamed over `<path>`. Runs without OAuth (stdio, plain HTTP) write the OAuth section back exactly as loaded, so they never clobber persisted OAuth state from a previous OAuth run.
+
+**File permissions**: on Unix the file is chmod'd to `0600` because it contains bearer tokens and the session cookie. On Windows the file inherits default ACLs — choose a path inside a user-only directory.
 
 **Missing file on startup**: treated as empty. First-run behaviour is unchanged.
 
-**Corrupt or unknown-version file**: logged as a `WARN`, renamed to `<path>.corrupt-<unix_ts>` for recovery, and startup proceeds with empty state rather than crashing. Clients re-register; no data beyond OAuth sessions is affected.
+**Corrupt or unknown-version file**: logged as a `WARN`, renamed to `<path>.corrupt-<unix_ts>` for recovery, and startup proceeds with empty state rather than crashing. Clients re-register, and the session falls back to the supplied `MAM_SESSION` value.

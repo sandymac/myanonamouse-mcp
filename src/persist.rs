@@ -1,28 +1,34 @@
 // Copyright (c) 2026 Sandy McArthur, Jr.
 // SPDX-License-Identifier: MIT
 
-//! File-based persistence for long-lived OAuth state (clients, access tokens,
-//! refresh tokens). Short-lived state (auth codes, pending consent sessions)
-//! is not persisted — those flows simply restart after a server restart.
+//! File-based persistence for long-lived server state: the current (possibly
+//! rotated) `mam_id` session cookie, plus — when OAuth is enabled — client
+//! registrations, access tokens, and refresh tokens. Short-lived OAuth state
+//! (auth codes, pending consent sessions) is not persisted — those flows
+//! simply restart after a server restart.
 //!
-//! Writes are debounced: mutations set a dirty flag on `OAuthState`, and a
+//! Writes are debounced: mutations set a dirty flag on `StateStore`, and a
 //! background task flushes every `FLUSH_INTERVAL` if dirty. File writes are
 //! atomic via `tmp` + `rename`. On Unix, the file is chmod'd to 0600 before
-//! rename because it contains bearer tokens.
+//! rename because it contains bearer tokens and the session cookie.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
-use super::state::{
+use crate::mam::SessionJar;
+use crate::oauth::state::{
     AccessToken, ClientRecord, OAuthState, REFRESH_GRACE_PERIOD, RefreshToken, UNAUTHED_CLIENT_TTL,
 };
 
 /// Schema version for the on-disk format. Bump when the JSON shape changes.
+/// (`mam_session` was added as an optional field without a bump — old files
+/// parse fine, and old binaries ignore the unknown field.)
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// How often the background task wakes to flush dirty state.
@@ -35,6 +41,26 @@ pub const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 #[derive(Serialize, Deserialize, Default)]
 pub struct PersistedState {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mam_session: Option<PersistedMamSession>,
+    #[serde(flatten)]
+    pub oauth: OAuthSection,
+}
+
+/// Tracks the `mam_id` session cookie across restarts. `seed` is the value the
+/// user originally supplied (via `--mam-session` / `MAM_SESSION`); `current`
+/// is the latest value after any `Set-Cookie` rotations by MAM.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct PersistedMamSession {
+    pub seed: String,
+    pub current: String,
+    pub updated_at_unix: u64,
+}
+
+/// The long-lived OAuth maps. Flattened into `PersistedState` so the on-disk
+/// shape is unchanged from when this file only held OAuth state.
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct OAuthSection {
     #[serde(default)]
     pub clients: HashMap<String, PersistedClient>,
     #[serde(default)]
@@ -43,7 +69,7 @@ pub struct PersistedState {
     pub refresh_tokens: HashMap<String, PersistedRefresh>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PersistedClient {
     pub redirect_uris: Vec<String>,
     #[serde(default)]
@@ -52,13 +78,13 @@ pub struct PersistedClient {
     pub authorized: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PersistedToken {
     pub client_id: String,
     pub expires_at_unix: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PersistedRefresh {
     pub client_id: String,
     pub expires_at_unix: u64,
@@ -70,13 +96,14 @@ impl PersistedState {
     pub fn empty() -> Self {
         Self {
             version: SCHEMA_VERSION,
-            clients: HashMap::new(),
-            access_tokens: HashMap::new(),
-            refresh_tokens: HashMap::new(),
+            mam_session: None,
+            oauth: OAuthSection::default(),
         }
     }
+}
 
-    /// Build a `PersistedState` from current runtime maps.
+impl OAuthSection {
+    /// Build an `OAuthSection` from current runtime maps.
     pub fn from_runtime(
         clients: &HashMap<String, ClientRecord>,
         access_tokens: &HashMap<String, AccessToken>,
@@ -130,14 +157,13 @@ impl PersistedState {
             .collect();
 
         Self {
-            version: SCHEMA_VERSION,
             clients,
             access_tokens,
             refresh_tokens,
         }
     }
 
-    /// Hydrate runtime maps from a `PersistedState`. Entries that have already
+    /// Hydrate runtime maps from an `OAuthSection`. Entries that have already
     /// expired at load time are dropped — they'd be swept seconds later anyway.
     pub fn into_runtime(
         self,
@@ -227,6 +253,156 @@ impl PersistedState {
 }
 
 // ---------------------------------------------------------------------------
+// StateStore
+// ---------------------------------------------------------------------------
+
+/// Owns the state file: path, debounced dirty flag, the live `mam_id` session
+/// record, and the OAuth section as loaded from disk (used as the write-back
+/// fallback when no live `OAuthState` is attached).
+pub struct StateStore {
+    path: PathBuf,
+    dirty: AtomicBool,
+    mam_session: Mutex<Option<PersistedMamSession>>,
+    /// OAuth section as loaded from disk — written back verbatim when no live
+    /// `OAuthState` is attached (stdio transport, plain HTTP), so a non-OAuth
+    /// run never clobbers persisted OAuth state.
+    loaded_oauth: Mutex<OAuthSection>,
+}
+
+impl StateStore {
+    /// Load the state file. A missing file is treated as empty — no error.
+    /// A corrupt or unknown-version file is renamed aside and treated as empty.
+    pub async fn load(path: PathBuf) -> anyhow::Result<Arc<Self>> {
+        let loaded = load_file(&path).await?;
+        info!(
+            path = %path.display(),
+            clients = loaded.oauth.clients.len(),
+            access_tokens = loaded.oauth.access_tokens.len(),
+            refresh_tokens = loaded.oauth.refresh_tokens.len(),
+            has_mam_session = loaded.mam_session.is_some(),
+            "Loaded persisted state",
+        );
+        Ok(Arc::new(Self {
+            path,
+            dirty: AtomicBool::new(false),
+            mam_session: Mutex::new(loaded.mam_session),
+            loaded_oauth: Mutex::new(loaded.oauth),
+        }))
+    }
+
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Resolve the effective `mam_id` for this run. If the stored record's seed
+    /// matches `provided`, the stored (possibly rotated) value wins. If
+    /// `provided` differs from the stored seed, the user supplied a new cookie —
+    /// start a fresh record and discard the stored one.
+    pub fn resolve_session(&self, provided: &str) -> String {
+        let mut rec = self.mam_session.lock().unwrap();
+        match rec.as_ref() {
+            Some(r) if r.seed == provided => {
+                if r.current != r.seed {
+                    info!("Using rotated mam_id from state file");
+                }
+                r.current.clone()
+            }
+            prior => {
+                if prior.is_some() {
+                    info!("Provided mam_id differs from stored seed; starting a fresh session record");
+                }
+                *rec = Some(PersistedMamSession {
+                    seed: provided.to_string(),
+                    current: provided.to_string(),
+                    updated_at_unix: now_unix(),
+                });
+                drop(rec);
+                self.mark_dirty();
+                provided.to_string()
+            }
+        }
+    }
+
+    /// Record the latest `mam_id` observed from the session jar. No-op if unchanged.
+    pub fn update_session(&self, current: &str) {
+        let mut rec = self.mam_session.lock().unwrap();
+        match rec.as_mut() {
+            Some(r) if r.current == current => return,
+            Some(r) => {
+                r.current = current.to_string();
+                r.updated_at_unix = now_unix();
+            }
+            None => {
+                *rec = Some(PersistedMamSession {
+                    seed: current.to_string(),
+                    current: current.to_string(),
+                    updated_at_unix: now_unix(),
+                });
+            }
+        }
+        drop(rec);
+        self.mark_dirty();
+        info!("Tracking rotated mam_id session cookie");
+    }
+
+    /// Force an immediate flush to disk, regardless of the dirty flag.
+    /// Used on graceful shutdown to capture any mutations from the last flush interval.
+    pub async fn flush(&self, oauth: Option<&OAuthState>) -> anyhow::Result<()> {
+        self.dirty.store(false, Ordering::Relaxed);
+        let snapshot = self.snapshot(oauth);
+        save(&self.path, &snapshot).await
+    }
+
+    /// Flush only if the dirty flag is set. Clears the flag *before* writing so
+    /// concurrent mutations during the write re-mark it for the next tick.
+    pub async fn flush_if_dirty(&self, oauth: Option<&OAuthState>) -> anyhow::Result<()> {
+        if !self.dirty.swap(false, Ordering::Relaxed) {
+            return Ok(());
+        }
+        let snapshot = self.snapshot(oauth);
+        if let Err(e) = save(&self.path, &snapshot).await {
+            // Re-set dirty so the next tick retries.
+            self.dirty.store(true, Ordering::Relaxed);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Take a snapshot of persisted state under brief sync locks. The locks are
+    /// released before this returns; no `.await` is held across them.
+    fn snapshot(&self, oauth: Option<&OAuthState>) -> PersistedState {
+        let oauth_section = match oauth {
+            Some(state) => state.snapshot(),
+            None => self.loaded_oauth.lock().unwrap().clone(),
+        };
+        PersistedState {
+            version: SCHEMA_VERSION,
+            mam_session: self.mam_session.lock().unwrap().clone(),
+            oauth: oauth_section,
+        }
+    }
+
+    /// Convert the OAuth section loaded from disk into runtime maps for
+    /// seeding a fresh `OAuthState`.
+    pub fn oauth_runtime(
+        &self,
+    ) -> (
+        HashMap<String, ClientRecord>,
+        HashMap<String, AccessToken>,
+        HashMap<String, RefreshToken>,
+    ) {
+        self.loaded_oauth.lock().unwrap().clone().into_runtime()
+    }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // Instant ↔ Unix helpers
 // ---------------------------------------------------------------------------
 
@@ -255,7 +431,7 @@ fn unix_to_instant(ts: u64, now_i: Instant, now_s: SystemTime) -> Option<Instant
 // Disk I/O
 // ---------------------------------------------------------------------------
 
-pub async fn load(path: &Path) -> anyhow::Result<PersistedState> {
+async fn load_file(path: &Path) -> anyhow::Result<PersistedState> {
     let bytes = match tokio::fs::read(path).await {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PersistedState::empty()),
@@ -269,7 +445,7 @@ pub async fn load(path: &Path) -> anyhow::Result<PersistedState> {
                 path = %path.display(),
                 version = state.version,
                 expected = SCHEMA_VERSION,
-                "Unknown OAuth state schema version; starting with empty state",
+                "Unknown state schema version; starting with empty state",
             );
             rename_corrupt(path).await;
             Ok(PersistedState::empty())
@@ -278,7 +454,7 @@ pub async fn load(path: &Path) -> anyhow::Result<PersistedState> {
             warn!(
                 path = %path.display(),
                 error = %e,
-                "Failed to parse OAuth state file; starting with empty state",
+                "Failed to parse state file; starting with empty state",
             );
             rename_corrupt(path).await;
             Ok(PersistedState::empty())
@@ -286,7 +462,7 @@ pub async fn load(path: &Path) -> anyhow::Result<PersistedState> {
     }
 }
 
-pub async fn save(path: &Path, state: &PersistedState) -> anyhow::Result<()> {
+async fn save(path: &Path, state: &PersistedState) -> anyhow::Result<()> {
     let json = serde_json::to_vec_pretty(state)?;
     let tmp_path = tmp_sibling(path, ".tmp");
 
@@ -303,14 +479,11 @@ pub async fn save(path: &Path, state: &PersistedState) -> anyhow::Result<()> {
 }
 
 async fn rename_corrupt(path: &Path) {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let ts = now_unix();
     let corrupt = tmp_sibling(path, &format!(".corrupt-{ts}"));
     match tokio::fs::rename(path, &corrupt).await {
-        Ok(()) => warn!(from = %path.display(), to = %corrupt.display(), "Renamed corrupt OAuth state file"),
-        Err(e) => warn!(from = %path.display(), to = %corrupt.display(), error = %e, "Failed to rename corrupt OAuth state file"),
+        Ok(()) => warn!(from = %path.display(), to = %corrupt.display(), "Renamed corrupt state file"),
+        Err(e) => warn!(from = %path.display(), to = %corrupt.display(), error = %e, "Failed to rename corrupt state file"),
     }
 }
 
@@ -324,17 +497,21 @@ fn tmp_sibling(path: &Path, suffix: &str) -> PathBuf {
 // Background flusher
 // ---------------------------------------------------------------------------
 
-pub fn spawn_persistence(state: Arc<OAuthState>) {
-    if !state.has_persist_path() {
-        return;
-    }
+/// Spawn the debounced flusher. Each tick it picks up any rotated `mam_id`
+/// from the session jar, then flushes to disk if anything is dirty.
+pub fn spawn_flusher(
+    store: Arc<StateStore>,
+    jar: Arc<SessionJar>,
+    oauth: Option<Arc<OAuthState>>,
+) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(FLUSH_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            if let Err(e) = state.flush_if_dirty().await {
-                warn!(error = %e, "OAuth state flush failed");
+            store.update_session(&jar.current());
+            if let Err(e) = store.flush_if_dirty(oauth.as_deref()).await {
+                warn!(error = %e, "State flush failed");
             }
         }
     });
@@ -354,7 +531,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        std::env::temp_dir().join(format!("mam-mcp-oauth-{tag}-{ts}.json"))
+        std::env::temp_dir().join(format!("mam-mcp-state-{tag}-{ts}.json"))
     }
 
     #[test]
@@ -386,7 +563,18 @@ mod tests {
         let bytes = serde_json::to_vec(&empty).unwrap();
         let back: PersistedState = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.version, SCHEMA_VERSION);
-        assert!(back.clients.is_empty());
+        assert!(back.oauth.clients.is_empty());
+        assert!(back.mam_session.is_none());
+    }
+
+    #[test]
+    fn legacy_oauth_only_file_parses() {
+        // A file written before mam_session existed — top-level OAuth maps, no
+        // mam_session key — must still parse.
+        let json = r#"{"version":1,"clients":{},"access_tokens":{},"refresh_tokens":{}}"#;
+        let back: PersistedState = serde_json::from_str(json).unwrap();
+        assert_eq!(back.version, SCHEMA_VERSION);
+        assert!(back.mam_session.is_none());
     }
 
     #[tokio::test]
@@ -396,13 +584,12 @@ mod tests {
 
         // Seed first instance.
         let (client_id, access, refresh) = {
-            let state = OAuthState::new_with_persistence(
+            let store = StateStore::load(path.clone()).await.unwrap();
+            let state = OAuthState::new(
                 "http://localhost:8080".into(),
                 None,
-                Some(path.clone()),
-            )
-            .await
-            .unwrap();
+                Some(store.clone()),
+            );
 
             let client_id = state
                 .register_client(
@@ -414,18 +601,17 @@ mod tests {
             let access = state.insert_access_token(client_id.clone());
             let refresh = state.insert_refresh_token(client_id.clone());
 
-            state.flush().await.unwrap();
+            store.flush(Some(&state)).await.unwrap();
             (client_id, access, refresh)
         };
 
         // Load a fresh instance from the same file.
-        let reloaded = OAuthState::new_with_persistence(
+        let store = StateStore::load(path.clone()).await.unwrap();
+        let reloaded = OAuthState::new(
             "http://localhost:8080".into(),
             None,
-            Some(path.clone()),
-        )
-        .await
-        .unwrap();
+            Some(store),
+        );
 
         assert!(reloaded.client_exists(&client_id));
         let info = reloaded.get_client(&client_id).expect("client present");
@@ -450,13 +636,8 @@ mod tests {
         let path = temp_state_path("missing");
         let _ = tokio::fs::remove_file(&path).await;
 
-        let state = OAuthState::new_with_persistence(
-            "http://localhost:8080".into(),
-            None,
-            Some(path.clone()),
-        )
-        .await
-        .unwrap();
+        let store = StateStore::load(path.clone()).await.unwrap();
+        let state = OAuthState::new("http://localhost:8080".into(), None, Some(store));
 
         assert!(!state.client_exists("anything"));
     }
@@ -466,13 +647,8 @@ mod tests {
         let path = temp_state_path("corrupt");
         tokio::fs::write(&path, b"{not valid json").await.unwrap();
 
-        let state = OAuthState::new_with_persistence(
-            "http://localhost:8080".into(),
-            None,
-            Some(path.clone()),
-        )
-        .await
-        .unwrap();
+        let store = StateStore::load(path.clone()).await.unwrap();
+        let state = OAuthState::new("http://localhost:8080".into(), None, Some(store));
 
         // Starts with empty state (no crash).
         assert!(!state.client_exists("anything"));
@@ -494,5 +670,81 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn mam_session_rotation_survives_restart() {
+        let path = temp_state_path("session-rotate");
+        let _ = tokio::fs::remove_file(&path).await;
+
+        // First run: seed from env, observe a rotation, flush.
+        {
+            let store = StateStore::load(path.clone()).await.unwrap();
+            assert_eq!(store.resolve_session("seed-cookie"), "seed-cookie");
+            store.update_session("rotated-cookie");
+            store.flush(None).await.unwrap();
+        }
+
+        // Second run with the same env value: rotated value wins.
+        {
+            let store = StateStore::load(path.clone()).await.unwrap();
+            assert_eq!(store.resolve_session("seed-cookie"), "rotated-cookie");
+        }
+
+        // Third run with a NEW env value: the new cookie wins, record resets.
+        {
+            let store = StateStore::load(path.clone()).await.unwrap();
+            assert_eq!(store.resolve_session("new-cookie"), "new-cookie");
+            store.flush(None).await.unwrap();
+        }
+
+        // Fourth run: the new seed is now stored.
+        {
+            let store = StateStore::load(path.clone()).await.unwrap();
+            assert_eq!(store.resolve_session("new-cookie"), "new-cookie");
+        }
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn non_oauth_flush_preserves_oauth_section() {
+        let path = temp_state_path("preserve-oauth");
+        let _ = tokio::fs::remove_file(&path).await;
+
+        // Run 1: HTTP+OAuth run persists a client.
+        let client_id = {
+            let store = StateStore::load(path.clone()).await.unwrap();
+            let state = OAuthState::new(
+                "http://localhost:8080".into(),
+                None,
+                Some(store.clone()),
+            );
+            let client_id = state
+                .register_client(vec!["http://localhost:9000/cb".into()], None)
+                .unwrap();
+            state.mark_client_authorized(&client_id);
+            store.flush(Some(&state)).await.unwrap();
+            client_id
+        };
+
+        // Run 2: stdio run (no OAuthState) records a session rotation and flushes.
+        {
+            let store = StateStore::load(path.clone()).await.unwrap();
+            assert_eq!(store.resolve_session("seed"), "seed");
+            store.update_session("rotated");
+            store.flush(None).await.unwrap();
+        }
+
+        // Run 3: OAuth run again — the client registration must have survived,
+        // and the rotated session must still be there.
+        {
+            let store = StateStore::load(path.clone()).await.unwrap();
+            assert_eq!(store.resolve_session("seed"), "rotated");
+            let state = OAuthState::new("http://localhost:8080".into(), None, Some(store));
+            assert!(state.client_exists(&client_id), "OAuth client must survive a non-OAuth flush");
+        }
+
+        let _ = tokio::fs::remove_file(&path).await;
     }
 }

@@ -2,17 +2,14 @@
 // SPDX-License-Identifier: MIT
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::Rng;
-use tracing::info;
 
-use super::persist;
+use crate::persist::{self, StateStore};
 
 // ---------------------------------------------------------------------------
 // Token/code generation
@@ -92,52 +89,20 @@ pub struct OAuthState {
     pending_auths: Mutex<HashMap<String, PendingAuth>>,
     access_tokens: Mutex<HashMap<String, AccessToken>>,
     refresh_tokens: Mutex<HashMap<String, RefreshToken>>,
-    persist_path: Option<PathBuf>,
-    dirty: AtomicBool,
+    /// When set, mutations of long-lived maps mark the store dirty so the
+    /// background flusher persists them. The store also seeds the maps at
+    /// construction from whatever was loaded off disk.
+    store: Option<Arc<StateStore>>,
 }
 
 impl OAuthState {
-    /// Construct with an optional persistence file. If `persist_path` is set
-    /// and the file exists, its contents seed the clients/access/refresh maps.
-    /// A missing file is treated as empty — no error.
-    pub async fn new_with_persistence(
-        issuer: String,
-        api_token: Option<String>,
-        persist_path: Option<PathBuf>,
-    ) -> anyhow::Result<Self> {
-        let (clients, access_tokens, refresh_tokens) = match persist_path.as_deref() {
-            Some(path) => {
-                let loaded = persist::load(path).await?;
-                let (c, a, r) = loaded.into_runtime();
-                info!(
-                    path = %path.display(),
-                    clients = c.len(),
-                    access_tokens = a.len(),
-                    refresh_tokens = r.len(),
-                    "Loaded persisted OAuth state",
-                );
-                (c, a, r)
-            }
+    /// Construct, seeding the long-lived maps (clients, access tokens, refresh
+    /// tokens) from the persisted state store when one is provided.
+    pub fn new(issuer: String, api_token: Option<String>, store: Option<Arc<StateStore>>) -> Self {
+        let (clients, access_tokens, refresh_tokens) = match &store {
+            Some(s) => s.oauth_runtime(),
             None => (HashMap::new(), HashMap::new(), HashMap::new()),
         };
-        Ok(Self::from_parts(
-            issuer,
-            api_token,
-            persist_path,
-            clients,
-            access_tokens,
-            refresh_tokens,
-        ))
-    }
-
-    fn from_parts(
-        issuer: String,
-        api_token: Option<String>,
-        persist_path: Option<PathBuf>,
-        clients: HashMap<String, ClientRecord>,
-        access_tokens: HashMap<String, AccessToken>,
-        refresh_tokens: HashMap<String, RefreshToken>,
-    ) -> Self {
         Self {
             issuer: issuer.trim_end_matches('/').to_string(),
             api_token,
@@ -146,59 +111,24 @@ impl OAuthState {
             pending_auths: Mutex::new(HashMap::new()),
             access_tokens: Mutex::new(access_tokens),
             refresh_tokens: Mutex::new(refresh_tokens),
-            persist_path,
-            dirty: AtomicBool::new(false),
+            store,
         }
-    }
-
-    pub fn has_persist_path(&self) -> bool {
-        self.persist_path.is_some()
     }
 
     fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::Relaxed);
+        if let Some(store) = &self.store {
+            store.mark_dirty();
+        }
     }
 
-    /// Force an immediate flush of persisted maps to disk, regardless of the dirty flag.
-    /// Used on graceful shutdown to capture any mutations from the last flush interval.
-    pub async fn flush(&self) -> anyhow::Result<()> {
-        let Some(path) = self.persist_path.as_deref() else {
-            return Ok(());
-        };
-        self.dirty.store(false, Ordering::Relaxed);
-        let snapshot = self.snapshot();
-        persist::save(path, &snapshot).await
-    }
-
-    /// Flush only if the dirty flag is set. Clears the flag *before* writing so
-    /// concurrent mutations during the write re-mark it for the next tick.
-    pub async fn flush_if_dirty(&self) -> anyhow::Result<()> {
-        if self.persist_path.is_none() {
-            return Ok(());
-        }
-        if !self.dirty.swap(false, Ordering::Relaxed) {
-            return Ok(());
-        }
-        let path = self
-            .persist_path
-            .as_deref()
-            .expect("persist_path checked above");
-        let snapshot = self.snapshot();
-        if let Err(e) = persist::save(path, &snapshot).await {
-            // Re-set dirty so the next tick retries.
-            self.dirty.store(true, Ordering::Relaxed);
-            return Err(e);
-        }
-        Ok(())
-    }
-
-    /// Take a snapshot of persisted maps under brief sync locks. The locks are
-    /// released before this returns; no `.await` is held across them.
-    fn snapshot(&self) -> persist::PersistedState {
+    /// Take a snapshot of the long-lived maps in persisted form, under brief
+    /// sync locks. The locks are released before this returns; no `.await` is
+    /// held across them.
+    pub(crate) fn snapshot(&self) -> persist::OAuthSection {
         let clients = self.clients.lock().unwrap();
         let access = self.access_tokens.lock().unwrap();
         let refresh = self.refresh_tokens.lock().unwrap();
-        persist::PersistedState::from_runtime(&clients, &access, &refresh)
+        persist::OAuthSection::from_runtime(&clients, &access, &refresh)
     }
 
     // -- Clients --

@@ -31,6 +31,16 @@ MyAnonamouse authenticates via a session cookie named `mam_id`. There is no API 
 
 Supply the value via the `--mam-session` flag or the `MAM_SESSION` environment variable. The cookie expires periodically; if you get authentication errors, refresh it from Preferences → Security and verify it with `--test-connection`.
 
+### Session persistence (recommended)
+
+MAM occasionally rotates the `mam_id` cookie on its responses. The server picks the rotated value up automatically while running, but without persistence it is lost on restart — and the original value you configured may no longer be valid. Pass `--state-file` (or set `MAM_STATE_FILE`) to keep the rotated cookie across restarts:
+
+```bash
+myanonamouse-mcp --mam-session <your_mam_id> --state-file ~/.config/myanonamouse-mcp/state.json
+```
+
+On startup the stored (rotated) cookie is used instead of `--mam-session`/`MAM_SESSION`. If you supply a *new* cookie value, it takes precedence and replaces the stored one — so refreshing a dead cookie works exactly as before, no need to delete the state file. The file also stores OAuth client registrations and tokens when the embedded OAuth server is enabled. Keep it in a user-only directory: it contains your session cookie.
+
 ## Quick start
 
 Verify your session cookie works:

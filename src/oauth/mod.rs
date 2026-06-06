@@ -5,7 +5,6 @@ pub mod authorize;
 pub mod cleanup;
 pub mod discovery;
 pub mod middleware;
-pub mod persist;
 pub mod registration;
 pub mod state;
 pub mod token;

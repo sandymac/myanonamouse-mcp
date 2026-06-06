@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 mod mam;
 mod oauth;
+mod persist;
 mod tools;
 
 #[derive(Parser, Debug)]
@@ -38,12 +39,14 @@ struct Cli {
     #[arg(long, env = "MAM_OAUTH_ISSUER")]
     oauth_issuer: Option<String>,
 
-    /// Path to a JSON file used to persist OAuth client registrations, access tokens,
-    /// and refresh tokens across restarts. Only meaningful with --oauth-issuer.
-    /// When unset, OAuth state is in-memory only and is lost on restart.
-    /// On Unix the file is chmod'd to 0600 because it contains bearer tokens.
-    #[arg(long, env = "MAM_OAUTH_STATE_FILE", value_name = "PATH")]
-    oauth_state_file: Option<std::path::PathBuf>,
+    /// Path to a JSON file used to persist server state across restarts: the current
+    /// (possibly rotated) mam_id session cookie, plus OAuth client registrations and
+    /// access/refresh tokens when --oauth-issuer is set. When unset, state is
+    /// in-memory only and is lost on restart. On Unix the file is chmod'd to 0600
+    /// because it contains bearer tokens and the session cookie.
+    /// (--oauth-state-file and MAM_OAUTH_STATE_FILE are accepted as legacy aliases.)
+    #[arg(long, env = "MAM_STATE_FILE", value_name = "PATH", alias = "oauth-state-file")]
+    state_file: Option<std::path::PathBuf>,
 
     /// Enable the search_torrents (full cross-category power search) and list_categories tools.
     #[arg(long, default_value_t = false)]
@@ -106,12 +109,33 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting myanonamouse-mcp");
 
+    // Legacy env var fallback for the pre-rename --oauth-state-file flag.
+    let state_file = cli.state_file.clone().or_else(|| {
+        std::env::var_os("MAM_OAUTH_STATE_FILE").map(std::path::PathBuf::from)
+    });
+    let state_store = match state_file {
+        Some(path) => Some(persist::StateStore::load(path).await?),
+        None => None,
+    };
+
     let mam_session = cli.mam_session.expect("--mam-session is required unless --list-tools is set");
-    let client = Arc::new(mam::build_client(&mam_session)?);
+    // The stored (rotated) mam_id wins over the env/CLI value — unless the user
+    // supplied a new cookie, which resets the stored session record.
+    let mam_session = match &state_store {
+        Some(store) => store.resolve_session(&mam_session),
+        None => mam_session,
+    };
+    let (client, session_jar) = mam::build_client(&mam_session)?;
+    let client = Arc::new(client);
 
     if cli.test_connection {
         let ip_info = mam::get_ip_info(&client).await?;
         eprintln!("Connection OK. IP: {}, ASN: {}", ip_info.ip, ip_info.asn_string());
+        // Capture any cookie rotation triggered by the test request.
+        if let Some(store) = &state_store {
+            store.update_session(&session_jar.current());
+            store.flush_if_dirty(None).await?;
+        }
         return Ok(());
     }
 
@@ -166,9 +190,25 @@ async fn main() -> anyhow::Result<()> {
     match cli.transport {
         Transport::Stdio => {
             info!("Starting MCP server on stdio");
+            if let Some(store) = &state_store {
+                persist::spawn_flusher(store.clone(), session_jar.clone(), None);
+            }
             let server = tools::MamServer::new(client, enabled_tools);
-            let service = server.serve(rmcp::transport::stdio()).await?;
-            service.waiting().await?;
+            // Run to completion, but always attempt the final state flush —
+            // even when the transport ends with an error (e.g. abrupt EOF).
+            let serve_result: anyhow::Result<()> = async {
+                let service = server.serve(rmcp::transport::stdio()).await?;
+                service.waiting().await?;
+                Ok(())
+            }
+            .await;
+            if let Some(store) = &state_store {
+                store.update_session(&session_jar.current());
+                if let Err(e) = store.flush(None).await {
+                    warn!(error = %e, "Final state flush failed");
+                }
+            }
+            serve_result?;
         }
 
         Transport::Http => {
@@ -208,23 +248,14 @@ async fn main() -> anyhow::Result<()> {
                 // --- OAuth 2.1 mode (optionally dual-mode with static api_token) ---
                 info!(issuer = %oauth_issuer, "OAuth 2.1 authorization server enabled");
 
-                let oauth_state = Arc::new(
-                    oauth::state::OAuthState::new_with_persistence(
-                        oauth_issuer,
-                        cli.api_token.clone(),
-                        cli.oauth_state_file.clone(),
-                    )
-                    .await?,
-                );
-
-                if let Some(ref path) = cli.oauth_state_file {
-                    info!(path = %path.display(), "OAuth state persistence enabled");
-                }
+                let oauth_state = Arc::new(oauth::state::OAuthState::new(
+                    oauth_issuer,
+                    cli.api_token.clone(),
+                    state_store.clone(),
+                ));
 
                 // Spawn background cleanup task
                 let _cleanup = oauth::cleanup::spawn_cleanup(oauth_state.clone());
-                // Spawn debounced persistence flusher (no-op when persist_path is None)
-                oauth::persist::spawn_persistence(oauth_state.clone());
 
                 shutdown_oauth_state = Some(oauth_state.clone());
 
@@ -286,21 +317,31 @@ async fn main() -> anyhow::Result<()> {
                     .layer(TraceLayer::new_for_http())
             };
 
+            // Spawn debounced state flusher (covers all auth modes)
+            if let Some(store) = &state_store {
+                persist::spawn_flusher(
+                    store.clone(),
+                    session_jar.clone(),
+                    shutdown_oauth_state.clone(),
+                );
+            }
+
             let listener = tokio::net::TcpListener::bind(&cli.http_bind).await?;
             info!("Listening on http://{}/mcp", cli.http_bind);
 
+            let shutdown_store = state_store.clone();
+            let shutdown_jar = session_jar.clone();
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
                     tokio::signal::ctrl_c()
                         .await
                         .expect("failed to listen for ctrl-c");
                     info!("Shutting down HTTP server");
-                    if let Some(state) = shutdown_oauth_state {
-                        if state.has_persist_path() {
-                            match state.flush().await {
-                                Ok(()) => info!("Flushed OAuth state to disk"),
-                                Err(e) => warn!(error = %e, "Final OAuth state flush failed"),
-                            }
+                    if let Some(store) = shutdown_store {
+                        store.update_session(&shutdown_jar.current());
+                        match store.flush(shutdown_oauth_state.as_deref()).await {
+                            Ok(()) => info!("Flushed state to disk"),
+                            Err(e) => warn!(error = %e, "Final state flush failed"),
                         }
                     }
                 })
