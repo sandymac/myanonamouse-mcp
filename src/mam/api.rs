@@ -311,7 +311,7 @@ pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String
             .and_then(|m| m.as_str())
             .unwrap_or("(no message)");
         let ip = v.get("ip").and_then(|i| i.as_str()).unwrap_or("");
-        let asn = v.get("ASN").and_then(|a| a.as_str()).unwrap_or_default();
+        let asn = v.get("ASN").map(super::asn_string).unwrap_or_default();
 
         if !success {
             return Err(format!(

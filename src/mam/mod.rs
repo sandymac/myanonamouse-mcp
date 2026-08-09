@@ -97,13 +97,18 @@ pub struct IpInfo {
     pub as_org: String,
 }
 
+/// MAM sends ASN as a JSON number on some endpoints and a string on others.
+pub(crate) fn asn_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        _ => String::new(),
+    }
+}
+
 impl IpInfo {
     pub fn asn_string(&self) -> String {
-        match &self.asn {
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::String(s) => s.clone(),
-            _ => String::new(),
-        }
+        asn_string(&self.asn)
     }
 }
 
