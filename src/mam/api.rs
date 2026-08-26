@@ -56,6 +56,7 @@ pub(crate) async fn do_search(
         "thumbnail": "false",
     });
 
+    super::throttle().await;
     let resp = client
         .post(format!("{BASE_URL}/tor/js/loadSearchJSONbasic.php"))
         .json(&body)
@@ -102,6 +103,7 @@ pub(crate) async fn get_user_data(
         query.push(("notif", "true".to_string()));
     }
 
+    super::throttle().await;
     let resp = client
         .get(format!("{BASE_URL}/jsonLoad.php"))
         .query(&query)
@@ -136,6 +138,7 @@ pub(crate) async fn get_user_bonus_history(
         query.push(("other_userid", uid.to_string()));
     }
 
+    super::throttle().await;
     let resp = client
         .get(format!("{BASE_URL}/json/userBonusHistory.php"))
         .query(&query)
@@ -183,6 +186,7 @@ pub(crate) async fn get_torrent_details(
         "mediaInfo": "",
     });
 
+    super::throttle().await;
     let resp = client
         .post(format!("{BASE_URL}/tor/js/loadSearchJSONbasic.php"))
         .json(&body)
@@ -258,6 +262,7 @@ pub(crate) async fn get_top_10(
         "bookmarks": "true",
     });
 
+    super::throttle().await;
     let resp = client
         .post(format!("{BASE_URL}/tor/js/loadSearchJSONbasic.php"))
         .json(&body)
@@ -291,6 +296,7 @@ pub(crate) async fn get_top_10(
 }
 
 pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String, String> {
+    super::throttle().await;
     let resp = client
         .get(format!("{BASE_URL}/json/dynamicSeedbox.php"))
         .send()
