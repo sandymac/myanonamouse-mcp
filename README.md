@@ -2,6 +2,28 @@
 
 An MCP (Model Context Protocol) server for [MyAnonamouse](https://www.myanonamouse.net) (MAM), a private tracker specialising in audiobooks and ebooks. Exposes MAM search and user tools to any MCP-compatible client such as Claude Desktop.
 
+## A Word of Warning
+
+As of 2026-08-18 MyAnonamouse rule 1.7 states (emphasis added):
+
+> You may not automate any site functions except those specifically listed in the API Documentation or approved by the site administrators.
+> This restriction applies to all methods of automation, including but not limited to bots, scripts, and user scripts.
+> You may not scrape content from our site.
+> Use of unauthorized automation/scraping may lead to account restrictions or disablement.
+
+> [!WARNING]
+> We do not recommend or support the use of AI(s) or LLM(s). However, if you choose to use AI(s) and/or LLM(s), you are solely responsible for it's actions.
+> Do not use these tools, if you do not completely understand the actions they are taking. The use of these tools is not a defense against breaching this rule.
+
+> [!CAUTION]
+> Do not provide your login credentials to anyone — human, AI, or LLM.
+
+> The Approved list can be found on the API list
+
+This code only uses the API published at the time the code was authored, and if you, the human, do the setup yourself you don't need to provide your mam_id session cookie to an AI or LLM as it's managed inside the MCP server config.
+
+It's very easy to give an LLM your mam_id during setup and later ask it to do something this MCP does not offer and the LLM decide to directly access myanonamouse.net with your mam_id cookie. Congratulations, you have loaded a weapon and given it to a child-like intelligence. Expect to get your account banned for your poor use of powerful tools.
+
 ## Prerequisites
 
 - A MyAnonamouse account
