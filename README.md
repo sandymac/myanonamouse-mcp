@@ -130,7 +130,7 @@ Run `myanonamouse-mcp --list-tools` to see all tools with their current default 
 | `search_music` | ✓ | Search musicology content (sheet music, tabs, instructional) by genre |
 | `search_radio` | ✓ | Search radio recordings by genre |
 | `get_torrent_details` | ✓ | Full details for one torrent by ID or hash |
-| `get_ip_info` | — | Check current IP and ASN as seen by MAM |
+| `get_ip_info` | — | Check current IP and ASN as seen by MAM (MAM allows one lookup per minute; the answer is reused for 60 s) |
 | `search_torrents` | — | Cross-category power search with numeric category/language IDs |
 | `list_categories` | — | Full category and subcategory ID table for `search_torrents` |
 | `get_user_data` | — | User profile — stats, ratio, seed bonus, notifications |

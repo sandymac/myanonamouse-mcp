@@ -67,6 +67,8 @@ MCP Client (Claude Desktop, etc.)
 
 A single HTTP client is built once at startup with the `mam_id` cookie and User-Agent pre-configured, then shared across all tool calls. The `MamServer` struct holds this shared client plus the set of enabled tool names, and is cloned per HTTP session when using the HTTP transport.
 
+**Rate limiting**: every outbound MAM request goes through `throttle()` in `src/mam/mod.rs`, which spaces requests `REQUEST_INTERVAL` (250 ms) apart process-wide. `json/jsonIp.php` is additionally limited by MAM to one request per minute, so `get_ip_info` caches its last answer for 60 s and concurrent callers share one request.
+
 ## File Structure
 
 | Path | Purpose |
@@ -104,7 +106,7 @@ Tools are grouped by opt-in flag. The default set is lean to minimise LLM token 
 | `get_ip_info` | seedbox | — | Current IP and ASN as seen by MAM |
 | `search_torrents` | power | — | Cross-category power search with raw category/language IDs |
 | `list_categories` | power | — | Returns full category/subcategory ID table for `search_torrents` |
-| `get_user_data` | user | — | User profile — stats, ratio, notifications |
+| `get_user_data` | user | — | User profile — stats, ratio, bonus point balance, notifications |
 | `get_user_bonus_history` | user | — | Bonus point transaction history |
 | `update_seedbox_ip` | seedbox | — | Register current IP as dynamic seedbox IP |
 

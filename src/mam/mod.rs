@@ -107,7 +107,7 @@ pub fn build_client(mam_session: &str) -> anyhow::Result<(reqwest::Client, Arc<S
 }
 
 /// Response from `/json/jsonIp.php`
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct IpInfo {
     pub ip: String,
     #[serde(rename = "ASN")]
@@ -131,8 +131,23 @@ impl IpInfo {
     }
 }
 
+/// MAM limits `/json/jsonIp.php` to one request per minute, so the last
+/// answer is reused for that long. Holding the lock across the fetch also
+/// collapses concurrent cold callers into a single request.
+const IP_INFO_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+static IP_INFO_CACHE: tokio::sync::Mutex<Option<(tokio::time::Instant, IpInfo)>> =
+    tokio::sync::Mutex::const_new(None);
+
 /// Fetch current IP info — used by `--test-connection` and the `get_ip_info` tool.
+/// Answers may be up to `IP_INFO_MIN_INTERVAL` old.
 pub async fn get_ip_info(client: &reqwest::Client) -> anyhow::Result<IpInfo> {
+    let mut cache = IP_INFO_CACHE.lock().await;
+    if let Some((at, info)) = &*cache {
+        if at.elapsed() < IP_INFO_MIN_INTERVAL {
+            return Ok(info.clone());
+        }
+    }
+
     throttle().await;
     let resp = client
         .get(format!("{BASE_URL}/json/jsonIp.php"))
@@ -146,8 +161,10 @@ pub async fn get_ip_info(client: &reqwest::Client) -> anyhow::Result<IpInfo> {
         return Err(anyhow!(enrich_error(status.as_u16(), &body)));
     }
 
-    serde_json::from_str::<IpInfo>(&body)
-        .map_err(|e| anyhow!("Failed to parse IP info response: {e}\nBody: {body}"))
+    let info = serde_json::from_str::<IpInfo>(&body)
+        .map_err(|e| anyhow!("Failed to parse IP info response: {e}\nBody: {body}"))?;
+    *cache = Some((tokio::time::Instant::now(), info.clone()));
+    Ok(info)
 }
 
 /// Produce a human-readable error string for MAM HTTP errors, with LLM hints where useful.
@@ -224,5 +241,25 @@ mod tests {
         while set.join_next().await.is_some() {}
         // first slot fires immediately, remaining four are REQUEST_INTERVAL apart
         assert!(start.elapsed() >= 4 * REQUEST_INTERVAL);
+    }
+
+    #[tokio::test]
+    async fn ip_info_is_served_from_cache_within_a_minute() {
+        // Any real request would go to a dead proxy and fail, so an Ok result
+        // proves the cache answered.
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+        let seeded = IpInfo {
+            ip: "10.0.0.1".into(),
+            asn: serde_json::json!(64512),
+            as_org: "Test".into(),
+        };
+        *IP_INFO_CACHE.lock().await = Some((tokio::time::Instant::now(), seeded));
+
+        let got = get_ip_info(&client).await.expect("cached answer");
+        assert_eq!(got.ip, "10.0.0.1");
+        assert_eq!(got.asn_string(), "64512");
     }
 }

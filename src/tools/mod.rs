@@ -462,7 +462,7 @@ impl MamServer {
     }
 
     /// Fetch profile data for the authenticated user or another user by ID.
-    /// Returns username, class, upload/download stats, ratio, and optionally notifications.
+    /// Returns username, class, upload/download stats, ratio, bonus point balance (seed bonus), wedges, and optionally notifications. Use this for "how many bonus points do I have"; use get_user_bonus_history for how they were earned or spent.
     #[tool(name = "mam_get_user_data", title = "Get User Data", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
     async fn get_user_data(
         &self,
@@ -477,7 +477,7 @@ impl MamServer {
     }
 
     /// Fetch bonus point transaction history for the authenticated user.
-    /// Returns a list of transactions with timestamp, type, amount, and associated torrent or user.
+    /// Returns a list of transactions with timestamp, type, amount, and associated torrent or user. For the current balance use get_user_data instead.
     #[tool(name = "mam_get_user_bonus_history", title = "Get Bonus History", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
     async fn get_user_bonus_history(
         &self,
@@ -503,7 +503,7 @@ impl MamServer {
         crate::mam::api::get_torrent_details(&self.client, p.id, p.hash).await
     }
 
-    /// Get the current IP address and ASN information as seen by MyAnonamouse.
+    /// Get the current IP address and ASN information as seen by MyAnonamouse. MAM allows one lookup per minute, so a result may be reused for up to 60 seconds.
     #[tool(name = "mam_get_ip_info", title = "Get IP Info", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
     async fn get_ip_info(&self, Parameters(_): Parameters<NoParams>) -> Result<String, String> {
         crate::mam::get_ip_info(&self.client)
