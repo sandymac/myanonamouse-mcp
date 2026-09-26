@@ -4,21 +4,51 @@ An MCP (Model Context Protocol) server for [MyAnonamouse](https://www.myanonamou
 
 ## A Word of Warning
 
-As of 2026-08-18 MyAnonamouse rule 1.7 states (emphasis added):
+As of 2026-09-22 MyAnonamouse rule 1.7 reads, verbatim:
 
+> **1.7 Bots, Automation, and Scraping**
+>
 > You may not automate any site functions except those specifically listed in the API Documentation or approved by the site administrators.
 > This restriction applies to all methods of automation, including but not limited to bots, scripts, and user scripts.
 > You may not scrape content from our site.
-> Use of unauthorized automation/scraping may lead to account restrictions or disablement.
-
-> [!WARNING]
-> We do not recommend or support the use of AI(s) or LLM(s). However, if you choose to use AI(s) and/or LLM(s), you are solely responsible for it's actions.
+>
+> User scripts that read, scrape, and then re-display/re-skin the site (vs just applying CSS changes, or adding elements) are strictly prohibited.
+> They cause many issues including (but not limited to):
+> Users missing key information
+> Missing functionality
+> Key site functions not working correctly or at all
+> The fact that a script is publicly posted, widely used, or has been available for a long time does not mean it has been reviewed or permitted.
+>
+> Use of unauthorized automation/scraping/scripts/extensions may lead to account restrictions or disablement.
+> You are responsible for everything done under your account, including actions you did not intend.
+>
+> We do not recommend or support the use of AI(s) or LLM(s). However, if you choose to use AI(s) and/or LLM(s), you are solely responsible for all actions performed.
 > Do not use these tools, if you do not completely understand the actions they are taking. The use of these tools is not a defense against breaching this rule.
-
-> [!CAUTION]
+>
 > Do not provide your login credentials to anyone — human, AI, or LLM.
+>
+> The approved list can be found on the API list, and are accessed with a cookie gained from Security section of your Preferences
+> Any form of automated/headless/cli login with email/password is not acceptable.
 
-> The Approved list can be found on the API list
+A copy of this text is kept in [`docs/MAM-rule-1.7-2026-09-22.md`](docs/MAM-rule-1.7-2026-09-22.md); the earlier wording is in the support ticket PDF beside it. Everything below this line is the project's own commentary, not MAM's.
+
+**This project has not been reviewed or approved by MyAnonamouse staff.** Being public on GitHub counts for nothing under rule 1.7. Whatever this server does under your account is on you, including actions you did not intend.
+
+**What the server does to stay inside the rule.** It calls only these endpoints, all on MAM's API list, and never fetches an HTML page at runtime:
+
+| Endpoint | Used by |
+|---|---|
+| `/tor/js/loadSearchJSONbasic.php` | every search tool, `get_torrent_details`, `get_top_10` |
+| `/jsonLoad.php` | `get_user_data` |
+| `/json/userBonusHistory.php` | `get_user_bonus_history` |
+| `/json/jsonIp.php` | `get_ip_info`, `--test-connection` |
+| `/json/dynamicSeedbox.php` | `update_seedbox_ip` |
+
+- It never logs in. There is no email/password code anywhere. The only credential it holds is the `mam_id` cookie you copy from Preferences → Security, which is exactly the access method the rule names.
+- The cookie is only ever sent to `*.myanonamouse.net` hosts.
+- Requests are spaced at least 250 ms apart, and IP lookups are held to one per minute as MAM's API docs require.
+- Only the six read-only search tools are enabled by default. Account and seedbox tools are opt-in flags, any tool can be removed with `--disable-tool`, and `--list-tools` shows exactly what an LLM will be able to call. Read that list before you connect one.
+- The state file holds your cookie and OAuth tokens. Keep it in a user-only directory.
 
 This code only uses the API published at the time the code was authored, and if you, the human, do the setup yourself you don't need to provide your mam_id session cookie to an AI or LLM as it's managed inside the MCP server config.
 
