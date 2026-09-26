@@ -17,8 +17,9 @@ use url::Url;
 pub const BASE_URL: &str = "https://www.myanonamouse.net";
 
 /// Rate limiter: outbound MAM requests sharing the one `mam_id` session are
-/// spaced at least 200 ms apart. Each caller claims the next free slot, so
-/// 5 concurrent requests take >= 1 s total.
+/// spaced at least `REQUEST_INTERVAL` apart. Each caller claims the next free slot,
+/// so 5 concurrent requests take >= 4 x REQUEST_INTERVAL total.
+pub(crate) const REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 // ponytail: process-global — one mam_id session per process, so global == per-session.
 static NEXT_SLOT: tokio::sync::Mutex<Option<tokio::time::Instant>> =
     tokio::sync::Mutex::const_new(None);
@@ -28,7 +29,7 @@ pub(crate) async fn throttle() {
         let mut next = NEXT_SLOT.lock().await;
         let now = tokio::time::Instant::now();
         let at = next.map_or(now, |n| n.max(now));
-        *next = Some(at + std::time::Duration::from_millis(200));
+        *next = Some(at + REQUEST_INTERVAL);
         at
     };
     tokio::time::sleep_until(at).await;
@@ -214,14 +215,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn throttle_spaces_concurrent_requests_200ms_apart() {
+    async fn throttle_spaces_concurrent_requests_by_interval() {
         let start = tokio::time::Instant::now();
         let mut set = tokio::task::JoinSet::new();
         for _ in 0..5 {
             set.spawn(throttle());
         }
         while set.join_next().await.is_some() {}
-        // first slot fires immediately, remaining four are 200 ms apart
-        assert!(start.elapsed().as_millis() >= 800);
+        // first slot fires immediately, remaining four are REQUEST_INTERVAL apart
+        assert!(start.elapsed() >= 4 * REQUEST_INTERVAL);
     }
 }

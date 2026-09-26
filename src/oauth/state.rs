@@ -48,9 +48,14 @@ pub struct AccessToken {
 pub struct RefreshToken {
     pub client_id: String,
     pub expires_at: Instant,
-    /// If this token was superseded by rotation, the time it was replaced.
-    /// It remains valid for a 30-second grace period after this instant.
-    pub superseded_at: Option<Instant>,
+    /// Hard ceiling inherited along the rotation chain from the original
+    /// authorization-code grant; sliding renewals never extend past it.
+    pub family_expires_at: Instant,
+    /// Set when this token is consumed by rotation: when, and the
+    /// (access, refresh) pair that replaced it. Presenting it again within
+    /// `REFRESH_GRACE_PERIOD` returns that same pair, so a retry after a lost
+    /// response or two clients racing to refresh don't get bounced to re-auth.
+    pub superseded: Option<(Instant, String, String)>,
 }
 
 pub struct PendingAuth {
@@ -70,7 +75,12 @@ const MAX_PENDING_AUTHS: usize = 1000;
 pub const UNAUTHED_CLIENT_TTL: Duration = Duration::from_secs(15 * 60);
 const AUTH_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const ACCESS_TOKEN_TTL: Duration = Duration::from_secs(3600);
-const REFRESH_TOKEN_TTL: Duration = Duration::from_secs(24 * 3600);
+/// Sliding: every refresh mints a new token with a full TTL, so this is the
+/// inactivity window before a client must re-authorize.
+const REFRESH_TOKEN_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+/// Absolute lifetime of a refresh-token chain from the consent that started
+/// it, so a stolen token cannot be kept alive indefinitely by refreshing.
+pub const REFRESH_ABSOLUTE_TTL: Duration = Duration::from_secs(90 * 24 * 3600);
 const PENDING_AUTH_TTL: Duration = Duration::from_secs(5 * 60);
 pub const REFRESH_GRACE_PERIOD: Duration = Duration::from_secs(30);
 
@@ -226,9 +236,14 @@ impl OAuthState {
 
     pub fn insert_access_token(&self, client_id: String) -> String {
         let token = generate_token();
+        self.store_access_token(token.clone(), client_id);
+        token
+    }
+
+    fn store_access_token(&self, token: String, client_id: String) {
         let mut tokens = self.access_tokens.lock().unwrap();
         tokens.insert(
-            token.clone(),
+            token,
             AccessToken {
                 client_id,
                 expires_at: Instant::now() + ACCESS_TOKEN_TTL,
@@ -236,7 +251,6 @@ impl OAuthState {
         );
         drop(tokens);
         self.mark_dirty();
-        token
     }
 
     /// Validate an access token. Returns the client_id if valid.
@@ -253,13 +267,15 @@ impl OAuthState {
 
     pub fn insert_refresh_token(&self, client_id: String) -> String {
         let token = generate_token();
+        let now = Instant::now();
         let mut tokens = self.refresh_tokens.lock().unwrap();
         tokens.insert(
             token.clone(),
             RefreshToken {
                 client_id,
-                expires_at: Instant::now() + REFRESH_TOKEN_TTL,
-                superseded_at: None,
+                expires_at: now + REFRESH_TOKEN_TTL,
+                family_expires_at: now + REFRESH_ABSOLUTE_TTL,
+                superseded: None,
             },
         );
         drop(tokens);
@@ -269,7 +285,10 @@ impl OAuthState {
 
     /// Consume a refresh token (rotation). Returns a new (access_token, refresh_token)
     /// pair, or None if the token is invalid/expired/past grace period/wrong client.
+    /// Re-presenting a token within `REFRESH_GRACE_PERIOD` of its rotation
+    /// returns the same pair that rotation produced (idempotent retry).
     pub fn rotate_refresh_token(&self, old_token: &str, client_id: &str) -> Option<(String, String)> {
+        let now = Instant::now();
         let mut tokens = self.refresh_tokens.lock().unwrap();
         let rt = tokens.get_mut(old_token)?;
 
@@ -278,40 +297,49 @@ impl OAuthState {
             return None;
         }
 
-        let now = Instant::now();
-
-        // Check expiry
-        if now > rt.expires_at {
+        let past_grace = matches!(&rt.superseded, Some((at, _, _)) if now > *at + REFRESH_GRACE_PERIOD);
+        if now > rt.expires_at || past_grace {
             tokens.remove(old_token);
             drop(tokens);
             self.mark_dirty();
             return None;
         }
 
-        // Check grace period for superseded tokens
-        if let Some(superseded_at) = rt.superseded_at {
-            if now > superseded_at + REFRESH_GRACE_PERIOD {
-                tokens.remove(old_token);
-                drop(tokens);
-                self.mark_dirty();
-                return None;
+        if let Some((_, access, refresh)) = rt.superseded.clone() {
+            // Lost-response retry: the successor is still unused, so hand
+            // back the same answer.
+            if tokens.get(&refresh).is_some_and(|s| s.superseded.is_none()) {
+                return Some((access, refresh));
             }
-            // Already superseded but within grace period — reject rather than
-            // minting yet another token pair, which would extend the window
-            // indefinitely and defeat rotation security.
+            // The successor was already rotated by someone else, so this is a
+            // replay of a captured token. Revoke everything the client holds:
+            // the real client re-consents once, the holder of the copy is out.
+            tokens.retain(|_, t| t.client_id != client_id);
+            drop(tokens);
+            self.access_tokens.lock().unwrap().retain(|_, t| t.client_id != client_id);
+            self.mark_dirty();
+            tracing::warn!(client_id, "refresh token reuse detected; revoked all tokens for client");
             return None;
         }
 
-        // Mark old token as superseded (keep for grace period for one retry)
-        rt.superseded_at = Some(now);
-
-        // Drop the lock before calling methods that re-acquire it
+        // Mint the replacement pair under the same lock so a concurrent retry
+        // sees it. The access token is generated here and stored just below.
+        let new_access = generate_token();
+        let new_refresh = generate_token();
+        let family_expires_at = rt.family_expires_at;
+        rt.superseded = Some((now, new_access.clone(), new_refresh.clone()));
+        tokens.insert(
+            new_refresh.clone(),
+            RefreshToken {
+                client_id: client_id.to_string(),
+                expires_at: (now + REFRESH_TOKEN_TTL).min(family_expires_at),
+                family_expires_at,
+                superseded: None,
+            },
+        );
         drop(tokens);
-        self.mark_dirty();
 
-        let new_access = self.insert_access_token(client_id.to_string());
-        let new_refresh = self.insert_refresh_token(client_id.to_string());
-
+        self.store_access_token(new_access.clone(), client_id.to_string());
         Some((new_access, new_refresh))
     }
 
@@ -346,12 +374,7 @@ impl OAuthState {
                 if now > t.expires_at {
                     return false;
                 }
-                if let Some(superseded_at) = t.superseded_at {
-                    if now > superseded_at + REFRESH_GRACE_PERIOD {
-                        return false;
-                    }
-                }
-                true
+                !matches!(&t.superseded, Some((at, _, _)) if now > *at + REFRESH_GRACE_PERIOD)
             });
             result.refresh_tokens = before - tokens.len();
         }
@@ -396,5 +419,55 @@ impl SweepResult {
             || self.refresh_tokens > 0
             || self.pending_auths > 0
             || self.stale_clients > 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_retry_within_grace_returns_same_pair() {
+        let state = OAuthState::new("http://localhost:8080".into(), None, None);
+        let client_id = state.register_client(vec!["http://localhost/cb".into()], None).unwrap();
+        let old = state.insert_refresh_token(client_id.clone());
+
+        let first = state.rotate_refresh_token(&old, &client_id).expect("first rotation");
+        let retry = state.rotate_refresh_token(&old, &client_id).expect("retry within grace");
+        assert_eq!(first, retry);
+
+        // Both tokens from the pair are live, and the wrong client is still rejected.
+        assert_eq!(state.validate_access_token(&first.0), Some(client_id.clone()));
+        assert!(state.rotate_refresh_token(&first.1, &client_id).is_some());
+        assert!(state.rotate_refresh_token(&old, "someone-else").is_none());
+    }
+
+    #[test]
+    fn refresh_replay_after_successor_rotated_revokes_client() {
+        let state = OAuthState::new("http://localhost:8080".into(), None, None);
+        let client_id = state.register_client(vec!["http://localhost/cb".into()], None).unwrap();
+        let r1 = state.insert_refresh_token(client_id.clone());
+        let (a2, r2) = state.rotate_refresh_token(&r1, &client_id).unwrap();
+        let (a3, r3) = state.rotate_refresh_token(&r2, &client_id).unwrap();
+
+        // r1 is two generations old: a replay, not a retry. Everything dies.
+        assert!(state.rotate_refresh_token(&r1, &client_id).is_none());
+        assert!(state.validate_access_token(&a2).is_none());
+        assert!(state.validate_access_token(&a3).is_none());
+        assert!(state.rotate_refresh_token(&r3, &client_id).is_none());
+    }
+
+    #[test]
+    fn refresh_rotation_never_extends_past_family_cap() {
+        let state = OAuthState::new("http://localhost:8080".into(), None, None);
+        let cap = Instant::now() + Duration::from_secs(60);
+        state.refresh_tokens.lock().unwrap().insert(
+            "r1".into(),
+            RefreshToken { client_id: "c".into(), expires_at: cap, family_expires_at: cap, superseded: None },
+        );
+        let (_, r2) = state.rotate_refresh_token("r1", "c").unwrap();
+        let tokens = state.refresh_tokens.lock().unwrap();
+        assert_eq!(tokens[&r2].expires_at, cap);
+        assert_eq!(tokens[&r2].family_expires_at, cap);
     }
 }

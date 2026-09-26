@@ -23,7 +23,7 @@ use tracing::{info, warn};
 
 use crate::mam::SessionJar;
 use crate::oauth::state::{
-    AccessToken, ClientRecord, OAuthState, REFRESH_GRACE_PERIOD, RefreshToken, UNAUTHED_CLIENT_TTL,
+    AccessToken, ClientRecord, OAuthState, REFRESH_ABSOLUTE_TTL, RefreshToken, UNAUTHED_CLIENT_TTL,
 };
 
 /// Schema version for the on-disk format. Bump when the JSON shape changes.
@@ -90,6 +90,8 @@ pub struct PersistedRefresh {
     pub expires_at_unix: u64,
     #[serde(default)]
     pub superseded_at_unix: Option<u64>,
+    #[serde(default)]
+    pub family_expires_at_unix: Option<u64>,
 }
 
 impl PersistedState {
@@ -149,8 +151,10 @@ impl OAuthSection {
                         client_id: v.client_id.clone(),
                         expires_at_unix: instant_to_unix(v.expires_at, now_i, now_s),
                         superseded_at_unix: v
-                            .superseded_at
-                            .map(|i| instant_to_unix(i, now_i, now_s)),
+                            .superseded
+                            .as_ref()
+                            .map(|(i, _, _)| instant_to_unix(*i, now_i, now_s)),
+                        family_expires_at_unix: Some(instant_to_unix(v.family_expires_at, now_i, now_s)),
                     },
                 )
             })
@@ -224,26 +228,23 @@ impl OAuthSection {
                 continue;
             }
 
-            // For superseded refresh tokens, the grace window is only 30 s —
-            // if restart took longer than that, drop the token outright.
-            let superseded_at = match pr.superseded_at_unix {
-                None => None,
-                Some(ts) => {
-                    let saved = UNIX_EPOCH + Duration::from_secs(ts);
-                    let since = now_s.duration_since(saved).unwrap_or(Duration::ZERO);
-                    if since >= REFRESH_GRACE_PERIOD {
-                        continue;
-                    }
-                    Some(now_i.checked_sub(since).unwrap_or(now_i))
-                }
-            };
+            // A superseded token is only useful as a grace-period retry, and
+            // its replacement pair isn't persisted — drop it across restarts.
+            if pr.superseded_at_unix.is_some() {
+                continue;
+            }
 
             refresh_tokens.insert(
                 tok,
                 RefreshToken {
                     client_id: pr.client_id,
                     expires_at,
-                    superseded_at,
+                    // Records written before the cap existed get a full window.
+                    family_expires_at: pr
+                        .family_expires_at_unix
+                        .and_then(|ts| unix_to_instant(ts, now_i, now_s))
+                        .unwrap_or(now_i + REFRESH_ABSOLUTE_TTL),
+                    superseded: None,
                 },
             );
         }
@@ -267,6 +268,10 @@ pub struct StateStore {
     /// `OAuthState` is attached (stdio transport, plain HTTP), so a non-OAuth
     /// run never clobbers persisted OAuth state.
     loaded_oauth: Mutex<OAuthSection>,
+    /// Serialises snapshot+write so two savers (background flusher, shutdown
+    /// flush) can't interleave on the shared `.tmp` file or land an older
+    /// snapshot after a newer one.
+    save_lock: tokio::sync::Mutex<()>,
 }
 
 impl StateStore {
@@ -287,6 +292,7 @@ impl StateStore {
             dirty: AtomicBool::new(false),
             mam_session: Mutex::new(loaded.mam_session),
             loaded_oauth: Mutex::new(loaded.oauth),
+            save_lock: tokio::sync::Mutex::new(()),
         }))
     }
 
@@ -348,6 +354,7 @@ impl StateStore {
     /// Force an immediate flush to disk, regardless of the dirty flag.
     /// Used on graceful shutdown to capture any mutations from the last flush interval.
     pub async fn flush(&self, oauth: Option<&OAuthState>) -> anyhow::Result<()> {
+        let _serialised = self.save_lock.lock().await;
         self.dirty.store(false, Ordering::Relaxed);
         let snapshot = self.snapshot(oauth);
         save(&self.path, &snapshot).await
@@ -356,6 +363,7 @@ impl StateStore {
     /// Flush only if the dirty flag is set. Clears the flag *before* writing so
     /// concurrent mutations during the write re-mark it for the next tick.
     pub async fn flush_if_dirty(&self, oauth: Option<&OAuthState>) -> anyhow::Result<()> {
+        let _serialised = self.save_lock.lock().await;
         if !self.dirty.swap(false, Ordering::Relaxed) {
             return Ok(());
         }

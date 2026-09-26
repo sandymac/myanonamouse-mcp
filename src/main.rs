@@ -203,10 +203,7 @@ async fn main() -> anyhow::Result<()> {
             }
             .await;
             if let Some(store) = &state_store {
-                store.update_session(&session_jar.current());
-                if let Err(e) = store.flush(None).await {
-                    warn!(error = %e, "Final state flush failed");
-                }
+                final_flush(store, &session_jar, None).await;
             }
             serve_result?;
         }
@@ -331,23 +328,55 @@ async fn main() -> anyhow::Result<()> {
 
             let shutdown_store = state_store.clone();
             let shutdown_jar = session_jar.clone();
+            let shutdown_oauth = shutdown_oauth_state.clone();
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
-                    tokio::signal::ctrl_c()
-                        .await
-                        .expect("failed to listen for ctrl-c");
+                    shutdown_signal().await;
                     info!("Shutting down HTTP server");
-                    if let Some(store) = shutdown_store {
-                        store.update_session(&shutdown_jar.current());
-                        match store.flush(shutdown_oauth_state.as_deref()).await {
-                            Ok(()) => info!("Flushed state to disk"),
-                            Err(e) => warn!(error = %e, "Final state flush failed"),
-                        }
+                    // Flush now, in case the connection drain below outlives
+                    // the supervisor's kill timeout (open SSE streams can).
+                    if let Some(store) = &shutdown_store {
+                        final_flush(store, &shutdown_jar, shutdown_oauth.as_deref()).await;
                     }
                 })
                 .await?;
+            // Drain finished: capture any refresh that happened during it.
+            if let Some(store) = &state_store {
+                final_flush(store, &session_jar, shutdown_oauth_state.as_deref()).await;
+            }
         }
     }
 
     Ok(())
+}
+
+/// Capture any cookie rotation and write the state file. Called at every
+/// shutdown point so mutations since the last 2 s flush are not lost.
+async fn final_flush(
+    store: &persist::StateStore,
+    jar: &mam::SessionJar,
+    oauth: Option<&oauth::state::OAuthState>,
+) {
+    store.update_session(&jar.current());
+    match store.flush(oauth).await {
+        Ok(()) => info!("Flushed state to disk"),
+        Err(e) => warn!(error = %e, "Final state flush failed"),
+    }
+}
+
+/// Resolve on Ctrl-C, or on SIGTERM (what systemd / docker stop send) on Unix,
+/// so the final state flush runs on every ordinary restart.
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to listen for SIGTERM");
+        tokio::select! {
+            r = ctrl_c => r.expect("failed to listen for ctrl-c"),
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    ctrl_c.await.expect("failed to listen for ctrl-c");
 }

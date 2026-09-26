@@ -185,6 +185,8 @@ Authorization: Bearer your-secret-token
 
 > For internet-facing deployments, put this behind a reverse proxy (nginx, Caddy, Traefik) that terminates TLS. The server itself does not handle HTTPS.
 
+For clients that speak OAuth (claude.ai, Claude Desktop connectors), add `--oauth-issuer https://<public-url>`; the server then runs its own OAuth 2.1 authorization server and `--api-token` doubles as the consent-page access code. Pass `--state-file` too, or every restart forgets all authorized clients and they must re-consent. Refresh tokens slide 30 days on each use, capped at 90 days from consent, so a client re-consents after 30 days idle or 90 days total. Outbound requests to MAM are spaced at least 250 ms apart.
+
 ## Tips for best results
 
 - Use `search_type: "active"` to exclude dead torrents (no seeders)
