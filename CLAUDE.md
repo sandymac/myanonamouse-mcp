@@ -80,7 +80,9 @@ A single HTTP client is built once at startup with the `mam_id` cookie and User-
 | `src/persist.rs` | State file persistence — `StateStore` (mam_id session record + OAuth maps), debounced background flusher, atomic writes |
 | `src/tools/mod.rs` | `MamServer` struct + all MCP tool implementations + genre/language/sort lookup tables + server handler |
 | `tests/` | Integration tests |
-| `api-docs/` | MAM API documentation (HTML); `Search-Form-HTML-fragment.html` is the primary source for search parameter names and category/language IDs |
+| `api-docs/` | Local copies of MAM API documentation (HTML). Git-ignored, so a fresh clone has none |
+
+`api-docs/` is git-ignored because it holds copies of pages from a members-only site. Developers should keep a local copy current: save each endpoint page linked from https://www.myanonamouse.net/api/list.php (the `.blockBodyCon` div is enough) into `api-docs/<Endpoint-Name>.html`, and refresh them whenever MAM updates the list. Code reviews then have the current published API to check request parameters, response fields, and rate limits against. Rule 1.7 only permits automating what that list contains, so a change there is a compliance question as well as a correctness one.
 
 ## Tool Implementation Pattern
 
