@@ -17,11 +17,11 @@ pub(crate) async fn do_search(
     lang: Vec<u32>,
     sort_type: &str,
     search_type: &str,
-    min_seeders: Option<i32>,
     limit: u32,
     offset: u32,
     srch_in: Option<Vec<String>>,
 ) -> Result<String, String> {
+    let limit = limit.max(1);
     let srch_in_val = if let Some(fields) = srch_in {
         serde_json::json!(fields)
     } else {
@@ -46,12 +46,10 @@ pub(crate) async fn do_search(
     if !lang.is_empty() {
         tor["browse_lang"] = serde_json::json!(lang);
     }
-    if let Some(min) = min_seeders {
-        tor["minSeeders"] = serde_json::json!(min);
-    }
     let body = serde_json::json!({
         "tor": tor,
-        "perpage": limit,
+        // MAM documents perpage as 5..=1000; ask for at least 5 and trim below.
+        "perpage": limit.max(5),
         "dlLink": "true",
         "thumbnail": "false",
     });
@@ -84,8 +82,12 @@ pub(crate) async fn do_search(
         }
     }
 
-    let parsed: SearchResponse = serde_json::from_str(&text)
+    let mut parsed: SearchResponse = serde_json::from_str(&text)
         .map_err(|e| format!("Failed to parse search response: {e}\nBody: {text}"))?;
+    if parsed.data.len() > limit as usize {
+        parsed.data.truncate(limit as usize);
+        parsed.total = limit as u64;
+    }
 
     Ok(format_search_response(parsed, query))
 }
@@ -121,6 +123,13 @@ pub(crate) async fn get_user_data(
         .json()
         .await
         .map_err(|e| format!("Failed to parse user data response: {e}"))?;
+    if let Some(err) = &parsed.error {
+        return Err(format!(
+            "MyAnonamouse error: {err}\n[Hint: The mam_id must be a valid API session cookie from \
+             Preferences → Security on MyAnonamouse (a browser session cookie is rejected). Ask the \
+             user for a fresh one if it has expired.]"
+        ));
+    }
 
     Ok(format_user_data(parsed))
 }
@@ -131,8 +140,8 @@ pub(crate) async fn get_user_bonus_history(
     other_user_id: Option<u64>,
 ) -> Result<String, String> {
     let mut query: Vec<(&str, String)> = Vec::new();
-    if let Some(types) = &bonus_types {
-        query.push(("type", types.join(",")));
+    for t in bonus_types.iter().flatten() {
+        query.push(("type[]", t.clone()));
     }
     if let Some(uid) = other_user_id {
         query.push(("other_userid", uid.to_string()));
@@ -169,7 +178,6 @@ pub(crate) async fn get_torrent_details(
         "searchType": "all",
         "searchIn": "torrents",
         "startNumber": "0",
-        "perpage": 1,
     });
     if let Some(id) = id {
         tor["id"] = serde_json::json!(id);
@@ -295,10 +303,30 @@ pub(crate) async fn get_top_10(
     Ok(format_search_response(parsed, &format!("Top 10 ({period_label})")))
 }
 
+/// Seedbox 403s are mostly session-setup problems, not expired cookies, so the
+/// generic `enrich_error` hint would send the user the wrong way.
+fn seedbox_http_error(status: u16, body: &str) -> String {
+    match status {
+        403 => format!(
+            "HTTP 403: {body}\n[Hint: Setting the seedbox IP needs a mam_id from an IP- or ASN-locked \
+             session with the dynamic seedbox allowance, created in Preferences → Security on \
+             MyAnonamouse, and the request must come from that IP/ASN. A browser session will not \
+             work. If the message says the cookie is invalid, ask the user for a fresh mam_id from \
+             such a session.]"
+        ),
+        429 => format!(
+            "HTTP 429: {body}\n[Hint: MyAnonamouse allows the seedbox IP to be changed once per hour \
+             (rolling window). Wait an hour before retrying.]"
+        ),
+        _ => enrich_error(status, body),
+    }
+}
+
 pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String, String> {
     super::throttle().await;
+    // MAM documents this endpoint on t.myanonamouse.net only.
     let resp = client
-        .get(format!("{BASE_URL}/json/dynamicSeedbox.php"))
+        .get("https://t.myanonamouse.net/json/dynamicSeedbox.php")
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -307,7 +335,7 @@ pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String
     let text = resp.text().await.unwrap_or_default();
 
     if !status.is_success() {
-        return Err(enrich_error(status.as_u16(), &text));
+        return Err(seedbox_http_error(status.as_u16(), &text));
     }
 
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -320,9 +348,7 @@ pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String
         let asn = v.get("ASN").map(super::asn_string).unwrap_or_default();
 
         if !success {
-            return Err(format!(
-                "{msg}\n[Hint: This endpoint is rate-limited to once per hour.]"
-            ));
+            return Err(msg.to_string());
         }
 
         let mut out = msg.to_string();
@@ -336,4 +362,16 @@ pub(crate) async fn update_seedbox_ip(client: &reqwest::Client) -> Result<String
     }
 
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seedbox_errors_get_specific_hints() {
+        assert!(seedbox_http_error(403, "x").contains("dynamic seedbox allowance"));
+        assert!(seedbox_http_error(429, "x").contains("once per hour"));
+        assert!(seedbox_http_error(503, "x").contains("temporarily unavailable"));
+    }
 }

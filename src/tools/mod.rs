@@ -77,8 +77,6 @@ struct SearchAudiobooksParams {
     sort: Option<String>,
     /// Torrent filter: all (default), active (1+ seeders), inactive, fl (freeleech), fl-VIP, VIP, nVIP.
     search_type: Option<String>,
-    /// Minimum seeders (1 excludes dead torrents).
-    min_seeders: Option<i32>,
     /// Max results (default 20, max 100).
     limit: Option<u32>,
     /// Pagination offset (default 0).
@@ -102,8 +100,6 @@ struct SearchEbooksParams {
     sort: Option<String>,
     /// Torrent filter: all (default), active (1+ seeders), inactive, fl (freeleech), fl-VIP, VIP, nVIP.
     search_type: Option<String>,
-    /// Minimum seeders (1 excludes dead torrents).
-    min_seeders: Option<i32>,
     /// Max results (default 20, max 100).
     limit: Option<u32>,
     /// Pagination offset (default 0).
@@ -127,8 +123,6 @@ struct SearchMusicParams {
     sort: Option<String>,
     /// Torrent filter: all (default), active (1+ seeders), inactive, fl (freeleech), fl-VIP, VIP, nVIP.
     search_type: Option<String>,
-    /// Minimum seeders (1 excludes dead torrents).
-    min_seeders: Option<i32>,
     /// Max results (default 20, max 100).
     limit: Option<u32>,
     /// Pagination offset (default 0).
@@ -152,8 +146,6 @@ struct SearchRadioParams {
     sort: Option<String>,
     /// Torrent filter: all (default), active (1+ seeders), inactive, fl (freeleech), fl-VIP, VIP, nVIP.
     search_type: Option<String>,
-    /// Minimum seeders (1 excludes dead torrents).
-    min_seeders: Option<i32>,
     /// Max results (default 20, max 100).
     limit: Option<u32>,
     /// Pagination offset (default 0).
@@ -178,8 +170,6 @@ struct SearchParams {
     #[serde(default, deserialize_with = "string_or_vec::deserialize")]
     #[schemars(transform = remove_null_default)]
     lang: Option<Vec<String>>,
-    /// Minimum seeders (1 excludes dead torrents).
-    min_seeders: Option<i32>,
     /// Subcategory ID. Call list_categories for the full table.
     cat: Option<Vec<u32>>,
     /// Fields to search in. Valid values: title, author, description, tags, series, narrator, filenames, fileTypes.
@@ -203,7 +193,7 @@ struct GetTop10Params {
 struct UserDataParams {
     /// User ID to fetch data for. Omit to fetch data for the authenticated user.
     user_id: Option<u64>,
-    /// Include unread notifications in the response
+    /// Include unread notifications in the response. Only works for your own account (ignored when user_id is set).
     include_notifications: Option<bool>,
 }
 
@@ -212,7 +202,7 @@ struct BonusHistoryParams {
     /// Bonus types to filter by. Valid values: giftPoints, giftWedge, wedgePF, wedgeGFL,
     /// torrentThanks, millionaires. Omit for all types.
     bonus_types: Option<Vec<String>>,
-    /// Fetch history for another user by their user ID
+    /// Only show gifts (points or wedges) exchanged with this user ID
     other_user_id: Option<u64>,
 }
 
@@ -267,7 +257,6 @@ impl MamServer {
             lang,
             sort,
             p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
             None,
@@ -309,7 +298,6 @@ impl MamServer {
             lang,
             sort,
             p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
             None,
@@ -349,7 +337,6 @@ impl MamServer {
             lang,
             sort,
             p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
             None,
@@ -386,7 +373,6 @@ impl MamServer {
             lang,
             sort,
             p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
             None,
@@ -440,7 +426,6 @@ impl MamServer {
             lang,
             sort,
             p.search_type.as_deref().unwrap_or("all"),
-            p.min_seeders,
             p.limit.unwrap_or(20).min(100),
             p.offset.unwrap_or(0),
             p.srch_in,
@@ -476,7 +461,7 @@ impl MamServer {
         .await
     }
 
-    /// Fetch bonus point transaction history for the authenticated user.
+    /// Fetch bonus point and wedge transaction history for the authenticated user.
     /// Returns a list of transactions with timestamp, type, amount, and associated torrent or user. For the current balance use get_user_data instead.
     #[tool(name = "mam_get_user_bonus_history", title = "Get Bonus History", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
     async fn get_user_bonus_history(

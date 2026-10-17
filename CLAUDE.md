@@ -109,7 +109,7 @@ Tools are grouped by opt-in flag. The default set is lean to minimise LLM token 
 | `search_torrents` | power | — | Cross-category power search with raw category/language IDs |
 | `list_categories` | power | — | Returns full category/subcategory ID table for `search_torrents` |
 | `get_user_data` | user | — | User profile — stats, ratio, bonus point balance, notifications |
-| `get_user_bonus_history` | user | — | Bonus point transaction history |
+| `get_user_bonus_history` | user | — | Bonus point and wedge transaction history |
 | `update_seedbox_ip` | seedbox | — | Register current IP as dynamic seedbox IP |
 
 ### Tool design
@@ -133,8 +133,8 @@ The server accepts these flags:
 - `--enable-power-tools` — enable `search_torrents` + `list_categories`
 - `--enable-user-tools` — enable `get_user_data` + `get_user_bonus_history`
 - `--enable-seedbox` — enable `update_seedbox_ip`
-- `--enable-tool=<name>` — enable a specific tool by name (repeatable)
-- `--disable-tool=<name>` — disable a specific tool (repeatable, always wins)
+- `--enable-tool=<text>` — enable every tool whose name contains `<text>` (substring match, repeatable)
+- `--disable-tool=<text>` — disable every tool whose name contains `<text>` (substring match, repeatable, always wins)
 - `--list-tools` — print all tools with group and default status, then exit
 - `--test-connection` — verify the session cookie works, then exit
 

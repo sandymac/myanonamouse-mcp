@@ -65,7 +65,10 @@ pub(crate) struct UserDataResponse {
     pub(crate) seedbonus: Option<u64>,
     pub(crate) wedges: Option<u64>,
     pub(crate) country_name: Option<String>,
+    pub(crate) vip_until: Option<String>,
     pub(crate) notifs: Option<Value>,
+    /// Set instead of the fields above when MAM rejects the session (HTTP 200).
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -75,7 +78,8 @@ pub(crate) struct BonusEntry {
     #[serde(rename = "type")]
     pub(crate) bonus_type: String,
     pub(crate) tid: Option<Value>,
-    pub(crate) title: Option<String>,
+    // Numeric titles (e.g. 1984) arrive as JSON numbers.
+    pub(crate) title: Option<Value>,
     pub(crate) other_userid: Option<Value>,
     pub(crate) other_name: Option<String>,
 }

@@ -4,12 +4,12 @@ An MCP (Model Context Protocol) server for [MyAnonamouse](https://www.myanonamou
 
 ## A Word of Warning
 
-As of 2026-09-22 MyAnonamouse rule 1.7 reads, verbatim:
+As of 2026-10-07 MyAnonamouse rule 1.7 reads, verbatim:
 
 > **1.7 Bots, Automation, and Scraping**
 >
 > You may not automate any site functions except those specifically listed in the API Documentation or approved by the site administrators.
-> This restriction applies to all methods of automation, including but not limited to bots, scripts, and user scripts.
+> This restriction applies to all methods of automation, including but not limited to bots, scripts, user scripts, AI assistants, browser agents, and LLM tools.
 > You may not scrape content from our site.
 >
 > User scripts that read, scrape, and then re-display/re-skin the site (vs just applying CSS changes, or adding elements) are strictly prohibited.
@@ -19,18 +19,19 @@ As of 2026-09-22 MyAnonamouse rule 1.7 reads, verbatim:
 > Key site functions not working correctly or at all
 > The fact that a script is publicly posted, widely used, or has been available for a long time does not mean it has been reviewed or permitted.
 >
-> Use of unauthorized automation/scraping/scripts/extensions may lead to account restrictions or disablement.
+> Use of unauthorized automation, scraping, scripts, extensions, AI assistants, browser agents, or LLM tools may lead to account restrictions or disablement.
 > You are responsible for everything done under your account, including actions you did not intend.
 >
-> We do not recommend or support the use of AI(s) or LLM(s). However, if you choose to use AI(s) and/or LLM(s), you are solely responsible for all actions performed.
-> Do not use these tools, if you do not completely understand the actions they are taking. The use of these tools is not a defense against breaching this rule.
+> We do not recommend or support the use of AI assistants, browser agents, or LLM tools. However, if you choose to use them, you are solely responsible for all actions performed.
+> Do not use these tools if you do not completely understand the actions they are taking. Using them is not a defense against breaching this rule.
 >
-> Do not provide your login credentials to anyone — human, AI, or LLM.
+> Do not provide your login credentials to anyone: any human, AI assistant, browser agent, or LLM tool.
+> Saved or stored credentials do not make an automated login acceptable, including one performed by an AI assistant, browser agent, or LLM tool.
+> Any form of automated, headless, or CLI login with email/password is not acceptable.
 >
-> The approved list can be found on the API list, and are accessed with a cookie gained from Security section of your Preferences
-> Any form of automated/headless/cli login with email/password is not acceptable.
+> Approved tools and services are listed in the API Documentation. They authenticate with a mam_id cookie generated in the Security section of your Preferences.
 
-A copy of this text is kept in [`docs/MAM-rule-1.7-2026-09-22.md`](docs/MAM-rule-1.7-2026-09-22.md); the earlier wording is in the support ticket PDF beside it. Everything below this line is the project's own commentary, not MAM's.
+A copy of this text is kept in [`docs/MAM-rule-1.7-2026-10-07.md`](docs/MAM-rule-1.7-2026-10-07.md); the previous 2026-09-22 wording is in [`docs/MAM-rule-1.7-2026-09-22.md`](docs/MAM-rule-1.7-2026-09-22.md) and the earlier wording is in the support ticket PDF beside them. Everything below this line is the project's own commentary, not MAM's.
 
 **This project has not been reviewed or approved by MyAnonamouse staff.** Being public on GitHub counts for nothing under rule 1.7. Whatever this server does under your account is on you, including actions you did not intend.
 
@@ -39,9 +40,9 @@ A copy of this text is kept in [`docs/MAM-rule-1.7-2026-09-22.md`](docs/MAM-rule
 | Endpoint | Used by |
 |---|---|
 | `/tor/js/loadSearchJSONbasic.php` | every search tool, `get_torrent_details`, `get_top_10` |
-| `/jsonLoad.php` | `get_user_data` |
+| `/jsonLoad.php` | `get_user_data`, `--test-connection` |
 | `/json/userBonusHistory.php` | `get_user_bonus_history` |
-| `/json/jsonIp.php` | `get_ip_info`, `--test-connection` |
+| `/json/jsonIp.php` | `get_ip_info` |
 | `/json/dynamicSeedbox.php` | `update_seedbox_ip` |
 
 - It never logs in. There is no email/password code anywhere. The only credential it holds is the `mam_id` cookie you copy from Preferences → Security, which is exactly the access method the rule names.
@@ -77,7 +78,10 @@ MyAnonamouse authenticates via a session cookie named `mam_id`. There is no API 
 
 1. Log into MyAnonamouse in your browser
 2. Go to **Preferences → Security**
-3. Copy the value shown for `mam_id`
+3. At the bottom of the page, use the **Create session** box. Give it the IP that *this server* will reach MAM from (your VPN or seedbox IP if it runs there), not your browser's IP
+4. Copy the generated `mam_id` value
+
+Create one session per service, as MAM's FAQ asks. Don't reuse a cookie you gave to Prowlarr, a seedbox script or another tool, and run seedbox tools from their own instance with their own session (see [Seedbox tools](#seedbox-tools)). Your browser's own login cookie won't work: MAM rejects it on the API with "Request not via correct session type".
 
 > The `mam_id` value is long and may contain an `%3D` which may need to be replaced with an `=` sign at the end. Use `--test-connection` to verify.
 
@@ -164,7 +168,7 @@ Run `myanonamouse-mcp --list-tools` to see all tools with their current default 
 | `search_torrents` | — | Cross-category power search with numeric category/language IDs |
 | `list_categories` | — | Full category and subcategory ID table for `search_torrents` |
 | `get_user_data` | — | User profile — stats, ratio, seed bonus, notifications |
-| `get_user_bonus_history` | — | Bonus point transaction history |
+| `get_user_bonus_history` | — | Bonus point and wedge transaction history |
 | `update_seedbox_ip` | — | Register current IP as dynamic seedbox IP |
 
 ### Tool groups
@@ -175,7 +179,7 @@ Tools are organised into groups to keep the default token footprint small. Enabl
 |---|---|---|---|
 | default | _(on by default)_ | `search_audiobooks`, `search_ebooks`, `search_music`, `search_radio`, `get_torrent_details` | Always available — read-only browsing and search |
 | power | `--enable-power-tools` | `search_torrents`, `list_categories` | Cross-category search using raw numeric IDs; useful when the per-category tools aren't flexible enough |
-| user | `--enable-user-tools` | `get_user_data`, `get_user_bonus_history` | Access to your account stats, ratio, and bonus point history |
+| user | `--enable-user-tools` | `get_user_data`, `get_user_bonus_history` | Access to your account stats, ratio, and bonus point and wedge history |
 | seedbox | `--enable-seedbox` | `update_seedbox_ip`, `get_ip_info` | Registers your current IP as a dynamic seedbox IP on MAM; check IP/ASN as seen by MAM |
 
 ```bash
@@ -185,17 +189,30 @@ myanonamouse-mcp --mam-session <id> --enable-power-tools
 # Enable user profile tools
 myanonamouse-mcp --mam-session <id> --enable-user-tools
 
-# Enable the seedbox IP registration tool
-myanonamouse-mcp --mam-session <id> --enable-seedbox
+# Seedbox tools: run a separate instance with its own session, see "Seedbox tools" below
 
 # Enable a specific tool by name
-myanonamouse-mcp --mam-session <id> --enable-tool=get_user_data
+myanonamouse-mcp --mam-session <id> --enable-tool=mam_get_user_data
 
 # Disable a default tool (e.g. restrict to ebooks only)
-myanonamouse-mcp --mam-session <id> --disable-tool=search_audiobooks --disable-tool=search_music --disable-tool=search_radio
+myanonamouse-mcp --mam-session <id> --disable-tool=mam_search_audiobooks --disable-tool=mam_search_music --disable-tool=mam_search_radio
 ```
 
-`--disable-tool` always wins over group and individual enable flags, regardless of the order flags appear on the command line.
+`--disable-tool` always wins over group and individual enable flags, regardless of the order flags appear on the command line. Both `--enable-tool` and `--disable-tool` match any part of a tool name: `--disable-tool=audiobooks` removes `mam_search_audiobooks`, and `--disable-tool=search` removes every search tool. Be careful with short patterns when enabling: `--enable-tool=ip` turns on `mam_update_seedbox_ip` as well as `mam_get_ip_info`. The server logs the final tool list at startup (`Enabled tools`) — check it — and warns about any flag that matches nothing.
+
+### Seedbox tools
+
+MAM's FAQ says to create one session per service and not to share a Dynamic Seedbox cookie with an indexer. This server uses one `mam_id` for every enabled tool, so **don't add `--enable-seedbox` to your search instance**. Run a second instance just for the seedbox tools:
+
+- **Its own session.** Create it in Preferences → Security, locked to the seedbox's IP or ASN, with the dynamic seedbox allowance turned on. A session without that allowance, or a browser cookie, gets HTTP 403.
+- **On the seedbox.** `update_seedbox_ip` registers the IP the request comes from, which is this server's IP. That's only useful if this instance runs on the seedbox or behind the same VPN.
+- **Its own state file.** If you use `--state-file`, give each instance a different path so their rotated cookies don't overwrite each other.
+- **Once per hour.** MAM accepts one seedbox IP change per hour (rolling window) and answers HTTP 429 to anything sooner.
+
+```bash
+myanonamouse-mcp --mam-session <seedbox_session_id> --state-file ~/.config/myanonamouse-mcp/seedbox-state.json \
+  --enable-seedbox --disable-tool=search --disable-tool=torrent_details --disable-tool=top_10
+```
 
 ## HTTP transport
 

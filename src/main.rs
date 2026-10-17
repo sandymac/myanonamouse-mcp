@@ -129,8 +129,11 @@ async fn main() -> anyhow::Result<()> {
     let client = Arc::new(client);
 
     if cli.test_connection {
-        let ip_info = mam::get_ip_info(&client).await?;
-        eprintln!("Connection OK. IP: {}, ASN: {}", ip_info.ip, ip_info.asn_string());
+        // jsonIp.php answers without a session, so only jsonLoad.php proves the cookie works.
+        let user = mam::api::get_user_data(&client, None, false)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("Connection OK.\n{user}");
         // Capture any cookie rotation triggered by the test request.
         if let Some(store) = &state_store {
             store.update_session(&session_jar.current());
@@ -174,14 +177,21 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // A pattern that matches nothing would otherwise be silently ignored.
+    for pat in cli.enable_tool.iter().chain(&cli.disable_tool) {
+        if !tools::ALL_TOOL_NAMES.iter().any(|n| tool_matches(n, std::slice::from_ref(pat))) {
+            warn!(tool = %pat, "Tool flag matches no tool, ignored; run --list-tools for valid names");
+        }
+    }
     // Per-tool enables
-    for tool in &cli.enable_tool {
-        enabled_tools.insert(tool.clone());
-    }
+    enabled_tools.extend(
+        tools::ALL_TOOL_NAMES
+            .iter()
+            .filter(|n| tool_matches(n, &cli.enable_tool))
+            .map(|n| n.to_string()),
+    );
     // Per-tool disables (always wins)
-    for tool in &cli.disable_tool {
-        enabled_tools.remove(tool);
-    }
+    enabled_tools.retain(|n| !tool_matches(n, &cli.disable_tool));
 
     let mut sorted_tools: Vec<&str> = enabled_tools.iter().map(|s| s.as_str()).collect();
     sorted_tools.sort();
@@ -379,4 +389,26 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     ctrl_c.await.expect("failed to listen for ctrl-c");
+}
+
+/// `--enable-tool` / `--disable-tool` match any part of a tool name, so `audiobooks`
+/// or `search` work without the `mam_` prefix. Empty patterns match nothing, so a
+/// stray `--enable-tool=` can't switch on every tool.
+fn tool_matches(name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| !p.is_empty() && name.contains(p.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_flags_match_substrings() {
+        let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(tool_matches("mam_search_audiobooks", &p(&["audiobooks"])));
+        assert!(tool_matches("mam_search_audiobooks", &p(&["mam_search_audiobooks"])));
+        assert!(tool_matches("mam_search_torrents", &p(&["nope", "search"])));
+        assert!(!tool_matches("mam_get_top_10", &p(&["search"])));
+        assert!(!tool_matches("mam_update_seedbox_ip", &p(&[""])));
+    }
 }

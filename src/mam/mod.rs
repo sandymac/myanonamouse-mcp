@@ -171,8 +171,10 @@ pub async fn get_ip_info(client: &reqwest::Client) -> anyhow::Result<IpInfo> {
 pub fn enrich_error(status: u16, body: &str) -> String {
     let hint = match status {
         401 | 403 => Some(
-            "The mam_id session cookie is invalid or expired. \
-             Ask the user to go to Preferences → Security on MyAnonamouse and provide the updated mam_id value.",
+            "The mam_id session cookie is invalid or expired, or is being used from an IP/ASN \
+             its session isn't locked to (check the message for \"IP address mismatch\"). \
+             Ask the user to check that session's IP/ASN lock in Preferences → Security on MyAnonamouse; \
+             if the cookie itself is dead, ask for a fresh mam_id from a session created for this server's IP.",
         ),
         429 => Some("Rate limited by MyAnonamouse. Wait before retrying."),
         503 => Some("MyAnonamouse is temporarily unavailable. Try again later."),

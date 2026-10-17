@@ -6,6 +6,16 @@ use serde_json::Value;
 use super::types::{BonusEntry, SearchResponse, TorrentDetail, UserDataResponse};
 use super::BASE_URL;
 
+/// Cookie-less download URL. MAM's API docs say to append `?tid=`; current
+/// responses already embed it in `dl`, so only add it when missing.
+fn download_url(dl: &str, id: u64) -> String {
+    if dl.contains("tid=") {
+        format!("{BASE_URL}/tor/download.php/{dl}")
+    } else {
+        format!("{BASE_URL}/tor/download.php/{dl}?tid={id}")
+    }
+}
+
 pub(crate) fn format_search_response(resp: SearchResponse, query: &str) -> String {
     if resp.data.is_empty() {
         return format!("No results found for \"{query}\".");
@@ -88,9 +98,7 @@ pub(crate) fn format_search_response(resp: SearchResponse, query: &str) -> Strin
 
         if let Some(dl) = &t.dl {
             if !dl.is_empty() {
-                out.push_str(&format!(
-                    "   DL URL:    {BASE_URL}/tor/download.php/{dl}\n",
-                ));
+                out.push_str(&format!("   DL URL:    {}\n", download_url(dl, t.id)));
             }
         }
     }
@@ -187,9 +195,7 @@ pub(crate) fn format_torrent_detail(t: TorrentDetail) -> String {
 
     if let Some(dl) = &t.dl {
         if !dl.is_empty() {
-            out.push_str(&format!(
-                "DL URL:      {BASE_URL}/tor/download.php/{dl}\n",
-            ));
+            out.push_str(&format!("DL URL:      {}\n", download_url(dl, t.id)));
         }
     }
 
@@ -238,6 +244,9 @@ pub(crate) fn format_user_data(resp: UserDataResponse) -> String {
     if let Some(wedges) = resp.wedges {
         out.push_str(&format!("Wedges:      {wedges}\n"));
     }
+    if let Some(vip) = &resp.vip_until {
+        out.push_str(&format!("VIP until:   {vip}\n"));
+    }
 
     if let Some(notifs) = &resp.notifs {
         let count = match notifs {
@@ -277,7 +286,7 @@ pub(crate) fn format_bonus_history(entries: Vec<BonusEntry>) -> String {
             btype = entry.bonus_type,
         ));
 
-        match (&entry.title, &entry.tid) {
+        match (entry.title.as_ref().map(value_as_str), &entry.tid) {
             (Some(title), _) if !title.is_empty() => {
                 out.push_str(&format!("\n    Torrent: {title}"));
             }
@@ -422,4 +431,32 @@ pub(crate) fn parse_series_map(json_str: &str) -> Vec<String> {
         .collect();
     series.sort();
     series
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_url_appends_tid_only_when_missing() {
+        assert_eq!(download_url("abc=", 42), format!("{BASE_URL}/tor/download.php/abc=?tid=42"));
+        assert_eq!(download_url("abc=?tid=42", 42), format!("{BASE_URL}/tor/download.php/abc=?tid=42"));
+    }
+
+    #[test]
+    fn parses_live_response_shapes() {
+        // Shapes from live MAM responses (2026-10-16); docs claim uid/ratio are strings, they are not.
+        let user: UserDataResponse = serde_json::from_str(
+            r#"{"classname":"x","downloaded":"1 GiB","ratio":29.699999999999999,"seedbonus":1,"uid":2,"uploaded":"1 TiB","username":"x","wedges":3}"#,
+        )
+        .unwrap();
+        assert!(format_user_data(user).contains("Ratio:       29.70"));
+
+        // Numeric title taken from MAM's own documented example output.
+        let entries: Vec<BonusEntry> = serde_json::from_str(
+            r#"[{"timestamp":1644804607.0994999,"amount":-1,"type":"wedgePF","tid":330896,"title":1984,"other_userid":null,"other_name":null}]"#,
+        )
+        .unwrap();
+        assert!(format_bonus_history(entries).contains("Torrent: 1984"));
+    }
 }
